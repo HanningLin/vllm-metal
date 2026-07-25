@@ -127,7 +127,7 @@ class TestByteLevelTokenizerCompatPatch:
         from transformers.tokenization_utils_tokenizers import TokenizersBackend
 
         _write_mismatched_bytelevel_tokenizer_repo(tmp_path)
-        compat._patch_vllm_bytelevel_tokenizer_loading()
+        compat.ensure_vllm_bytelevel_tokenizer_patch()
 
         tokenizer = tokenizer_registry.get_tokenizer(tmp_path, tokenizer_mode="hf")
         decoded = tokenizer.decode([0, 1])
@@ -246,7 +246,7 @@ class TestGemma4MTPConfigCompatPatch:
         assert config.text_config.num_kv_shared_layers == 0
         assert get_hf_text_config(config).model_type == "gemma4_text"
 
-    def test_missing_gemma4_config_module_does_not_stop_other_patches(
+    def test_registration_time_failures_do_not_stop_other_patches(
         self,
         monkeypatch,
     ) -> None:
@@ -267,10 +267,15 @@ class TestGemma4MTPConfigCompatPatch:
             "_gemma4_assistant_config_class",
             _raise_missing_gemma4_config,
         )
+
+        def _raise_bytelevel_import_error() -> None:
+            calls.append("bytelevel")
+            raise ImportError("partial vLLM import")
+
         monkeypatch.setattr(
             compat,
-            "_patch_vllm_bytelevel_tokenizer_loading",
-            lambda: calls.append("bytelevel"),
+            "ensure_vllm_bytelevel_tokenizer_patch",
+            _raise_bytelevel_import_error,
         )
         monkeypatch.setattr(
             compat,

@@ -28,11 +28,19 @@ def apply_compat_patches() -> None:
         return
     _APPLIED = True
     _patch_vllm_gemma4_mtp_config_loading()
-    _patch_vllm_bytelevel_tokenizer_loading()
+    _apply_bytelevel_patch_during_registration()
     ensure_vllm_auto_fit_null_block_patch()
     _patch_mlx_lm_qwen35_fp8_sanitize()
     _patch_mlx_lm_gemma4_kv_shared_sanitize()
     _patch_transformers_exaone4_config()
+
+
+def _apply_bytelevel_patch_during_registration() -> None:
+    """Best-effort install while vLLM may still be partially imported."""
+    try:
+        ensure_vllm_bytelevel_tokenizer_patch()
+    except ImportError as exc:
+        logger.debug("Deferring vLLM ByteLevel tokenizer patch: %s", exc)
 
 
 def ensure_vllm_auto_fit_null_block_patch() -> None:
@@ -488,7 +496,7 @@ def _maybe_load_bytelevel_tokenizers_backend(
     return tokenizer
 
 
-def _patch_vllm_bytelevel_tokenizer_loading() -> None:
+def ensure_vllm_bytelevel_tokenizer_patch() -> None:
     """Use TokenizersBackend at vLLM's serving tokenizer boundary when needed.
 
     Some MLX-community Qwen/DeepSeek redistributions ship a ByteLevel
@@ -496,17 +504,13 @@ def _patch_vllm_bytelevel_tokenizer_loading() -> None:
     transformers versions instantiate a Llama/SentencePiece-style decoder.
     That decoder leaves ByteLevel token pieces such as "\u0120" and "\u010a"
     in served text.
+
+    Idempotent and safe to call repeatedly. Plugin activation may run while vLLM
+    is partially initialized, so ``apply_compat_patches`` defers import failure
+    and ``MetalPlatform.check_and_update_config`` retries after vLLM imports.
     """
-    try:
-        import vllm.tokenizers.registry as tokenizer_registry
-        from vllm.tokenizers.protocol import TokenizerLike
-    except ImportError as exc:
-        logger.warning(
-            "Could not install vLLM ByteLevel tokenizer compatibility patch "
-            "because vLLM tokenizer registry is unavailable: %s",
-            exc,
-        )
-        return
+    import vllm.tokenizers.registry as tokenizer_registry
+    from vllm.tokenizers.protocol import TokenizerLike
 
     sentinel = "_vllm_metal_bytelevel_decoder_patch"
     if getattr(tokenizer_registry, sentinel, False):

@@ -14,7 +14,7 @@ from vllm.v1.attention.selector import AttentionSelectorConfig
 from vllm.v1.core.kv_cache_utils import get_kv_cache_configs
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec
 
-from vllm_metal.compat import ensure_vllm_auto_fit_null_block_patch
+import vllm_metal.compat as compat
 from vllm_metal.config import reset_config
 from vllm_metal.platform import MetalPlatform
 from vllm_metal.v1.cache_policy import WorkerCachePlanner
@@ -134,6 +134,21 @@ class TestMetalPlatform:
             )
         finally:
             reset_config()
+
+    def test_check_and_update_config_fails_if_bytelevel_retry_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _raise_import_error() -> None:
+            raise ImportError("tokenizer registry unavailable")
+
+        monkeypatch.setattr(
+            compat,
+            "ensure_vllm_bytelevel_tokenizer_patch",
+            _raise_import_error,
+        )
+
+        with pytest.raises(ImportError, match="tokenizer registry unavailable"):
+            MetalPlatform.check_and_update_config(SimpleNamespace())
 
     def test_check_and_update_config_rejects_pipeline_ring_port_overflow(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1624,7 +1639,7 @@ class TestAutoFitMaxModelLenChain:
         """The null-block auto-fit patch (compat.py) is part of the contract
         under test; ensure it directly because plugin activation can skip it
         while vLLM is partially imported."""
-        ensure_vllm_auto_fit_null_block_patch()
+        compat.ensure_vllm_auto_fit_null_block_patch()
 
     _BLOCK_SIZE = 16
     # 16 tokens x (50 x 16 x 256 + 10 x 4 x 512) heads*dims x K/V x bf16 —
