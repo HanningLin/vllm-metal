@@ -66,7 +66,6 @@ def _hybrid_runner():
 def _tq_config() -> MetalConfig:
     return MetalConfig(
         memory_fraction=-1.0,
-        use_mlx=False,
         mlx_device="gpu",
         debug=False,
         use_paged_attention=True,

@@ -290,7 +290,6 @@ class TestCachePolicyPerLayerBytes:
             "vllm_metal.v1.cache_policy.get_config",
             lambda: MetalConfig(
                 memory_fraction=AUTO_MEMORY_FRACTION,
-                use_mlx=True,
                 mlx_device="gpu",
                 debug=False,
                 turboquant=True,
@@ -420,7 +419,6 @@ class TestMHAKVCacheLayout:
             "vllm_metal.v1.cache_policy.get_config",
             lambda: MetalConfig(
                 memory_fraction=AUTO_MEMORY_FRACTION,
-                use_mlx=True,
                 mlx_device="gpu",
                 debug=False,
                 turboquant=False,
@@ -466,7 +464,6 @@ class TestMHAKVCacheLayout:
             "vllm_metal.v1.cache_policy.get_config",
             lambda: MetalConfig(
                 memory_fraction=AUTO_MEMORY_FRACTION,
-                use_mlx=True,
                 mlx_device="gpu",
                 debug=False,
                 turboquant=False,
@@ -506,7 +503,6 @@ class TestMHAKVCacheLayout:
         )
         metal_config = MetalConfig(
             memory_fraction=1.0,
-            use_mlx=True,
             mlx_device="gpu",
             debug=False,
             turboquant=False,
@@ -571,7 +567,6 @@ class TestMHAKVCacheLayout:
         )
         metal_config = MetalConfig(
             memory_fraction=1.0,
-            use_mlx=True,
             mlx_device="gpu",
             debug=False,
             turboquant=False,
@@ -615,7 +610,6 @@ class TestMHAKVCacheLayout:
         )
         metal_config = MetalConfig(
             memory_fraction=1.0,
-            use_mlx=True,
             mlx_device="gpu",
             debug=False,
             turboquant=False,

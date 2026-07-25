@@ -175,13 +175,12 @@ class MetalPlatform(Platform):
             raise ValueError(msg)
 
         config = get_config()
-        if config.use_mlx:
-            import mlx.core as mx
+        import mlx.core as mx
 
-            device_type = (
-                mx.DeviceType.gpu if config.mlx_device == "gpu" else mx.DeviceType.cpu
-            )
-            mx.set_default_device(mx.Device(device_type))
+        device_type = (
+            mx.DeviceType.gpu if config.mlx_device == "gpu" else mx.DeviceType.cpu
+        )
+        mx.set_default_device(mx.Device(device_type))
 
     @classmethod
     def current_device(cls) -> int:

@@ -5,7 +5,6 @@
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `VLLM_METAL_MEMORY_FRACTION` | `auto` | Metal memory budget mode; see [Paged KV vs MLX KV Memory Settings](#paged-kv-vs-mlx-kv-memory-settings) |
-| `VLLM_METAL_USE_MLX` | `1` | Use MLX for compute (1=yes, 0=no) |
 | `VLLM_MLX_DEVICE` | `gpu` | MLX device (`gpu` or `cpu`) |
 | `VLLM_METAL_USE_PAGED_ATTENTION` | `1` | Enable experimental paged KV cache |
 | `VLLM_METAL_DEBUG` | `0` | Enable debug logging |

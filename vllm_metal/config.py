@@ -35,7 +35,6 @@ class MetalConfig:
     """Configuration for vLLM Metal plugin."""
 
     memory_fraction: float  # -1.0 selects the active backend's auto policy
-    use_mlx: bool
     mlx_device: Literal["gpu", "cpu"]
     debug: bool
     use_paged_attention: bool = True
@@ -114,7 +113,6 @@ class MetalConfig:
         # See MetalPlatform.check_and_update_config() for how it's applied.
         return cls(
             memory_fraction=memory_fraction,
-            use_mlx=envs.VLLM_METAL_USE_MLX,
             mlx_device=envs.VLLM_MLX_DEVICE,  # type: ignore[arg-type]
             debug=envs.VLLM_METAL_DEBUG,
             use_paged_attention=envs.VLLM_METAL_USE_PAGED_ATTENTION,
