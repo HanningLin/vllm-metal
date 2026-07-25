@@ -353,8 +353,7 @@ class MetalPlatform(Platform):
                 f"k_quant={config.k_quant}, v_quant={config.v_quant}"
             )
 
-        if config.debug:
-            logger.info(f"Metal config: {config}")
+        logger.debug("Metal config: %s", config)
 
         # Set worker class for Metal
         if parallel_config.worker_cls == "auto":

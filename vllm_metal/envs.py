@@ -21,7 +21,6 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     VLLM_METAL_MEMORY_FRACTION: str = "auto"
     VLLM_MLX_DEVICE: str = "gpu"
-    VLLM_METAL_DEBUG: bool = False
     VLLM_METAL_USE_PAGED_ATTENTION: bool = True
     VLLM_METAL_MULTIMODAL_MODE: str = "auto"
     VLLM_METAL_MODELSCOPE_CACHE: str | None = None
@@ -41,8 +40,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # MLX device type: "gpu" (default) or "cpu".
     "VLLM_MLX_DEVICE": lambda: os.getenv("VLLM_MLX_DEVICE", "gpu"),
-    # Enable verbose debug logging (default False).
-    "VLLM_METAL_DEBUG": lambda: os.getenv("VLLM_METAL_DEBUG", "0") == "1",
     # Use native Metal paged attention (default True).
     "VLLM_METAL_USE_PAGED_ATTENTION": lambda: (
         os.getenv("VLLM_METAL_USE_PAGED_ATTENTION", "1") == "1"

@@ -7,7 +7,6 @@
 | `VLLM_METAL_MEMORY_FRACTION` | `auto` | Metal memory budget mode; see [Paged KV vs MLX KV Memory Settings](#paged-kv-vs-mlx-kv-memory-settings) |
 | `VLLM_MLX_DEVICE` | `gpu` | MLX device (`gpu` or `cpu`) |
 | `VLLM_METAL_USE_PAGED_ATTENTION` | `1` | Enable experimental paged KV cache |
-| `VLLM_METAL_DEBUG` | `0` | Enable debug logging |
 | `VLLM_METAL_MULTIMODAL_MODE` | `auto` | Multimodal serve mode: `auto` uses the compatibility allowlist; `multimodal-native` disables overrides |
 | `VLLM_USE_MODELSCOPE` | `False` | Set True to change model registry to <https://www.modelscope.cn/> |
 | `VLLM_METAL_MODELSCOPE_CACHE` | None | Specify the absolute path of the local model |

@@ -309,8 +309,7 @@ class ModelLifecycle:
         # Dimension resolution reads model_args immediately after this phase.
         runner.model_args = loaded_model.model_args
         runner._vocab_size = int(loaded_model.model_args["vocab_size"])
-        if runner.metal_config.debug:
-            logger.info("Model args: %s", loaded_model.model_args)
+        logger.debug("Model args: %s", loaded_model.model_args)
 
     def _install_runner_attention_dims(self, args: dict[str, Any]) -> int | None:
         """Install runner-wide attention dims and return the default head_dim."""

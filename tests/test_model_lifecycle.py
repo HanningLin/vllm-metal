@@ -135,7 +135,6 @@ def _make_lifecycle(
 ) -> tuple[ModelLifecycle, object]:
     runner = make_stub_runner(
         model_args=model_args,
-        metal_config=SimpleNamespace(debug=False),
         model_config=model_config or _runner_model_config(),
     )
     lifecycle = ModelLifecycle(runner, runner._model_adapter)
@@ -218,7 +217,6 @@ class TestModelLifecycle:
                 return True
 
         runner = make_stub_runner(
-            metal_config=SimpleNamespace(debug=False),
             model_config=_runner_model_config(
                 hf_config=hf_config,
                 is_multimodal_model=True,
@@ -255,7 +253,6 @@ class TestModelLifecycle:
 
         def _lazy_for(pp: PipelineGroup | None) -> bool:
             runner = make_stub_runner(
-                metal_config=SimpleNamespace(debug=False),
                 model_config=_runner_model_config(),
                 pp=pp,
             )
