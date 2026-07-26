@@ -244,9 +244,28 @@ class TestV1MetalModelRunnerSampleTokens:
         assert out is None
 
 
+class TestPagedBlockIds:
+    def test_copies_only_runtime_scheduler_groups(self) -> None:
+        runner = make_stub_runner(_paged_block_size=4)
+
+        block_ids = runner._copy_paged_block_ids(([1, 2], [9]))
+
+        assert block_ids == [[1, 2]]
+
+    def test_rejects_missing_runtime_scheduler_group(self) -> None:
+        runner = make_stub_runner(_paged_block_size=4)
+        runner._paged_scheduler_group_indices = (1,)
+
+        with pytest.raises(ValueError, match="required cache groups"):
+            runner._copy_paged_block_ids(([1, 2],))
+
+
 class TestV1MetalModelRunnerSpecDecodeVerification:
     def _make_runner(self) -> mr.MetalModelRunner:
-        return make_stub_runner(model_args={"vocab_size": 16})
+        return make_stub_runner(
+            model_args={"vocab_size": 16},
+            _paged_block_size=4,
+        )
 
     def _make_state(
         self,
@@ -357,7 +376,7 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
 
     def test_start_paged_forward_includes_scheduled_drafts(self, monkeypatch) -> None:
         # Opt into window mode so the captured kwarg pins the full
-        # flag -> merge_verify_windows -> prepare_unified chain.
+        # flag -> merge_verify_windows -> prepare_grouped chain.
         monkeypatch.setenv("VLLM_METAL_SPEC_VERIFY_WINDOW", "1")
         runner = self._make_runner()
         runner.vllm_config = self._make_gemma4_mtp_config()
@@ -368,12 +387,12 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
 
         captured: dict[str, object] = {}
 
-        def fake_prepare_unified(
-            decode_info, prefill_info, block_size, *, merge_verify_windows
+        def capture_prepare_grouped(
+            decode_info, prefill_info, block_sizes, *, merge_verify_windows
         ):
             captured["decode_info"] = decode_info
             captured["prefill_info"] = prefill_info
-            captured["block_size"] = block_size
+            captured["block_size"] = block_sizes[0]
             captured["merge_verify_windows"] = merge_verify_windows
 
         def fake_target_forward(input_ids, *, cache, collect_hidden_states):
@@ -385,11 +404,11 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
                 hidden_states=mx.ones((3, 4)),
             )
 
-        monkeypatch.setattr(mr, "prepare_unified", fake_prepare_unified)
+        monkeypatch.setattr(mr, "prepare_grouped", capture_prepare_grouped)
         monkeypatch.setattr(runner, "_target_forward", fake_target_forward)
 
         req_state = self._make_state([1, 6])
-        req_state.block_ids = [0, 1]
+        req_state.block_ids = [[0, 1]]
         scheduler_output = self._make_scheduler_output(
             {"r0": 3},
             {"r0": [7, 8]},
@@ -404,7 +423,7 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
 
         assert captured["input_ids"] == [[6, 7, 8]]
         assert captured["collect_hidden_states"] is True
-        assert captured["decode_info"] == [([0, 1], 1, 3)]
+        assert captured["decode_info"] == [([[0, 1]], 1, 3)]
         assert captured["prefill_info"] == []
         assert captured["block_size"] == 4
         assert captured["merge_verify_windows"] is True
@@ -430,9 +449,10 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
 
         captured: dict[str, object] = {}
 
-        def fake_prepare_unified(
-            decode_info, prefill_info, block_size, *, merge_verify_windows
+        def capture_prepare_grouped(
+            decode_info, prefill_info, block_sizes, *, merge_verify_windows
         ):
+            del prefill_info, block_sizes, merge_verify_windows
             captured["decode_info"] = decode_info
 
         def fake_target_forward(input_ids, *, cache, collect_hidden_states):
@@ -443,11 +463,11 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
                 hidden_states=mx.ones((1, 4)),
             )
 
-        monkeypatch.setattr(mr, "prepare_unified", fake_prepare_unified)
+        monkeypatch.setattr(mr, "prepare_grouped", capture_prepare_grouped)
         monkeypatch.setattr(runner, "_target_forward", fake_target_forward)
 
         req_state = self._make_state([1, 6])
-        req_state.block_ids = [0, 1]
+        req_state.block_ids = [[0, 1]]
         scheduler_output = self._make_scheduler_output(
             {"r0": 3},
             {"r0": [-1, -1]},
@@ -461,7 +481,7 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
         )
 
         assert captured["input_ids"] == [[6]]
-        assert captured["decode_info"] == [([0, 1], 1, 1)]
+        assert captured["decode_info"] == [([[0, 1]], 1, 1)]
         assert runner._execute_model_state is not None
         assert runner._execute_model_state.cu_seqlens == [0, 1]
 
@@ -475,12 +495,13 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
 
         captured: dict[str, object] = {}
 
-        def fake_prepare_unified(
-            decode_info, prefill_info, block_size, *, merge_verify_windows
+        def capture_prepare_grouped(
+            decode_info, prefill_info, block_sizes, *, merge_verify_windows
         ):
+            del merge_verify_windows
             captured["decode_info"] = decode_info
             captured["prefill_info"] = prefill_info
-            captured["block_size"] = block_size
+            captured["block_size"] = block_sizes[0]
 
         def fake_target_forward(input_ids, *, cache, collect_hidden_states):
             del cache
@@ -488,11 +509,11 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
             captured["collect_hidden_states"] = collect_hidden_states
             return mr.TargetModelForwardOutput(logits=mx.zeros((1, 1, 16)))
 
-        monkeypatch.setattr(mr, "prepare_unified", fake_prepare_unified)
+        monkeypatch.setattr(mr, "prepare_grouped", capture_prepare_grouped)
         monkeypatch.setattr(runner, "_target_forward", fake_target_forward)
 
         req_state = self._make_state([1, 6])
-        req_state.block_ids = [0, 1]
+        req_state.block_ids = [[0, 1]]
         scheduler_output = self._make_scheduler_output({"r0": 1}, {})
 
         runner._start_paged_forward(
@@ -504,7 +525,7 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
 
         assert captured["input_ids"] == [[6]]
         assert captured["collect_hidden_states"] is False
-        assert captured["decode_info"] == [([0, 1], 1, 1)]
+        assert captured["decode_info"] == [([[0, 1]], 1, 1)]
         assert captured["prefill_info"] == []
         assert captured["block_size"] == 4
         assert runner._execute_model_state is not None
@@ -531,13 +552,15 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
         )
         runner.num_layers = 0
         runner._paged_block_size = 4
+        runner._paged_group_block_sizes = (4,)
+        runner._paged_scheduler_group_indices = (0,)
         scheduler_output = self._make_scheduler_output({"p0": 1, "p1": 1}, {})
         prefill_reqs = [
             mr.PrefillRequest(
                 req_id="p0",
                 token_ids=[5],
                 sampling_params=SamplingParams(),
-                block_ids=[0],
+                block_ids=[[0]],
                 generator=None,
                 prompt_len=1,
                 start_pos=0,
@@ -547,7 +570,7 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
                 req_id="p1",
                 token_ids=[6],
                 sampling_params=SamplingParams(),
-                block_ids=[1],
+                block_ids=[[1]],
                 generator=None,
                 prompt_len=1,
                 start_pos=0,
@@ -579,12 +602,13 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
 
         captured: dict[str, object] = {}
 
-        def fake_prepare_unified(
-            decode_info, prefill_info, block_size, *, merge_verify_windows
+        def capture_prepare_grouped(
+            decode_info, prefill_info, block_sizes, *, merge_verify_windows
         ):
+            del merge_verify_windows
             captured["decode_info"] = decode_info
             captured["prefill_info"] = prefill_info
-            captured["block_size"] = block_size
+            captured["block_size"] = block_sizes[0]
 
         def fake_target_forward(input_ids, *, cache, collect_hidden_states):
             del cache
@@ -595,11 +619,11 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
                 hidden_states=mx.ones((1, 4)),
             )
 
-        monkeypatch.setattr(mr, "prepare_unified", fake_prepare_unified)
+        monkeypatch.setattr(mr, "prepare_grouped", capture_prepare_grouped)
         monkeypatch.setattr(runner, "_target_forward", fake_target_forward)
 
         req_state = self._make_state([1, 6])
-        req_state.block_ids = [0, 1]
+        req_state.block_ids = [[0, 1]]
         scheduler_output = self._make_scheduler_output({"r0": 1}, {})
 
         runner._start_paged_forward(
@@ -611,7 +635,7 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
 
         assert captured["input_ids"] == [[6]]
         assert captured["collect_hidden_states"] is True
-        assert captured["decode_info"] == [([0, 1], 1, 1)]
+        assert captured["decode_info"] == [([[0, 1]], 1, 1)]
         assert captured["prefill_info"] == []
         assert captured["block_size"] == 4
         assert runner._execute_model_state is not None
@@ -629,12 +653,13 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
 
         captured: dict[str, object] = {}
 
-        def fake_prepare_unified(
-            decode_info, prefill_info, block_size, *, merge_verify_windows
+        def capture_prepare_grouped(
+            decode_info, prefill_info, block_sizes, *, merge_verify_windows
         ):
+            del merge_verify_windows
             captured["decode_info"] = decode_info
             captured["prefill_info"] = prefill_info
-            captured["block_size"] = block_size
+            captured["block_size"] = block_sizes[0]
 
         def fake_target_forward(input_ids, *, cache, collect_hidden_states):
             del cache
@@ -645,7 +670,7 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
                 hidden_states=mx.ones((2, 4)),
             )
 
-        monkeypatch.setattr(mr, "prepare_unified", fake_prepare_unified)
+        monkeypatch.setattr(mr, "prepare_grouped", capture_prepare_grouped)
         monkeypatch.setattr(runner, "_target_forward", fake_target_forward)
 
         scheduler_output = self._make_scheduler_output({"r0": 2}, {})
@@ -657,7 +682,7 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
                     req_id="r0",
                     token_ids=[5, 6],
                     sampling_params=SamplingParams(),
-                    block_ids=[0],
+                    block_ids=[[0]],
                     generator=None,
                     prompt_len=2,
                     start_pos=0,
@@ -671,7 +696,7 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
         assert captured["input_ids"] == [[5, 6]]
         assert captured["collect_hidden_states"] is True
         assert captured["decode_info"] == []
-        assert captured["prefill_info"] == [([0], 2, 0)]
+        assert captured["prefill_info"] == [([[0]], 2, 0)]
         assert captured["block_size"] == 4
         assert runner._execute_model_state is not None
         assert runner._execute_model_state.target_hidden_states is not None
@@ -688,12 +713,13 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
 
         captured: dict[str, object] = {}
 
-        def fake_prepare_unified(
-            decode_info, prefill_info, block_size, *, merge_verify_windows
+        def capture_prepare_grouped(
+            decode_info, prefill_info, block_sizes, *, merge_verify_windows
         ):
+            del merge_verify_windows
             captured["decode_info"] = decode_info
             captured["prefill_info"] = prefill_info
-            captured["block_size"] = block_size
+            captured["block_size"] = block_sizes[0]
 
         def fake_target_forward(input_ids, *, cache, collect_hidden_states):
             del cache
@@ -701,7 +727,7 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
             captured["collect_hidden_states"] = collect_hidden_states
             return mr.TargetModelForwardOutput(logits=mx.zeros((1, 2, 16)))
 
-        monkeypatch.setattr(mr, "prepare_unified", fake_prepare_unified)
+        monkeypatch.setattr(mr, "prepare_grouped", capture_prepare_grouped)
         monkeypatch.setattr(runner, "_target_forward", fake_target_forward)
 
         scheduler_output = self._make_scheduler_output({"r0": 2}, {})
@@ -713,7 +739,7 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
                     req_id="r0",
                     token_ids=[5, 6],
                     sampling_params=SamplingParams(),
-                    block_ids=[0],
+                    block_ids=[[0]],
                     generator=None,
                     prompt_len=None,
                     start_pos=0,
@@ -727,7 +753,7 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
         assert captured["input_ids"] == [[5, 6]]
         assert captured["collect_hidden_states"] is False
         assert captured["decode_info"] == []
-        assert captured["prefill_info"] == [([0], 2, 0)]
+        assert captured["prefill_info"] == [([[0]], 2, 0)]
         assert captured["block_size"] == 4
         assert runner._execute_model_state is not None
         assert runner._execute_model_state.target_hidden_states is None
@@ -744,7 +770,7 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
             num_query_tokens=3,
             draft_token_ids=(7, 8),
             cache_start_pos=1,
-            block_ids=(0,),
+            block_ids=((0,),),
         )
         scheduler_output = self._make_scheduler_output(
             {"r0": 3},
@@ -803,7 +829,7 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
             num_query_tokens=2,
             draft_token_ids=(7,),
             cache_start_pos=1,
-            block_ids=(0,),
+            block_ids=((0,),),
         )
         scheduler_output = self._make_scheduler_output(
             {"r0": 2},
@@ -836,7 +862,7 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
             token_id=9,
             target_hidden_row=1,
             target_position=2,
-            block_ids=(0,),
+            block_ids=((0,),),
         )
         assert draft_token_ids == DraftTokenIds(["r0"], [[42]])
 
@@ -872,7 +898,7 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
             num_query_tokens=1,
             draft_token_ids=(),
             cache_start_pos=1,
-            block_ids=(0,),
+            block_ids=((0,),),
         )
         scheduler_output = self._make_scheduler_output(
             {"r0": 1},
@@ -926,7 +952,7 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
             req_id="p0",
             token_ids=[5, 6],
             sampling_params=SamplingParams(temperature=0.0),
-            block_ids=[0],
+            block_ids=[[0]],
             generator=None,
             prompt_len=2,
             start_pos=0,
@@ -963,7 +989,7 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
             token_id=7,
             target_hidden_row=1,
             target_position=1,
-            block_ids=(0,),
+            block_ids=((0,),),
         )
         assert draft_token_ids == DraftTokenIds(["p0"], [[43]])
 
@@ -978,7 +1004,7 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
             num_query_tokens=3,
             draft_token_ids=(7, 8),
             cache_start_pos=1,
-            block_ids=(0,),
+            block_ids=((0,),),
         )
         scheduler_output = self._make_scheduler_output(
             {"r0": 3},
@@ -1013,7 +1039,7 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
                 num_query_tokens=2,
                 draft_token_ids=(7,),
                 cache_start_pos=1,
-                block_ids=(0,),
+                block_ids=((0,),),
             ),
             mr.PagedDecodeSegment(
                 req_id="plain",
@@ -1022,7 +1048,7 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
                 num_query_tokens=1,
                 draft_token_ids=(),
                 cache_start_pos=1,
-                block_ids=(1,),
+                block_ids=((1,),),
             ),
         )
         scheduler_output = self._make_scheduler_output(
@@ -1060,7 +1086,7 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
                 num_query_tokens=2,
                 draft_token_ids=(7,),
                 cache_start_pos=1,
-                block_ids=(0,),
+                block_ids=((0,),),
             ),
             mr.PagedDecodeSegment(
                 req_id="plain",
@@ -1069,7 +1095,7 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
                 num_query_tokens=1,
                 draft_token_ids=(),
                 cache_start_pos=1,
-                block_ids=(1,),
+                block_ids=((1,),),
             ),
         )
         scheduler_output = self._make_scheduler_output(
@@ -1112,7 +1138,7 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
                 num_query_tokens=1,
                 draft_token_ids=(),
                 cache_start_pos=1,
-                block_ids=(0,),
+                block_ids=((0,),),
             ),
             mr.PagedDecodeSegment(
                 req_id="draft",
@@ -1121,7 +1147,7 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
                 num_query_tokens=2,
                 draft_token_ids=(7,),
                 cache_start_pos=1,
-                block_ids=(1,),
+                block_ids=((1,),),
             ),
         )
         scheduler_output = self._make_scheduler_output(
@@ -1159,7 +1185,7 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
                 num_query_tokens=2,
                 draft_token_ids=(7,),
                 cache_start_pos=1,
-                block_ids=(0,),
+                block_ids=((0,),),
             ),
             mr.PagedDecodeSegment(
                 req_id="structured",
@@ -1168,7 +1194,7 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
                 num_query_tokens=1,
                 draft_token_ids=(),
                 cache_start_pos=1,
-                block_ids=(1,),
+                block_ids=((1,),),
             ),
         )
         scheduler_output = self._make_scheduler_output(
@@ -1204,7 +1230,7 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
             num_query_tokens=2,
             draft_token_ids=(7,),
             cache_start_pos=1,
-            block_ids=(0,),
+            block_ids=((0,),),
         )
         scheduler_output = self._make_scheduler_output(
             {"r0": 2},
@@ -1237,7 +1263,7 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
             num_query_tokens=2,
             draft_token_ids=(7,),
             cache_start_pos=1,
-            block_ids=(0,),
+            block_ids=((0,),),
         )
         scheduler_output = self._make_scheduler_output(
             {"r0": 2},
@@ -1443,7 +1469,7 @@ class TestV1MetalModelRunnerExecuteModel:
             sampling_params=SamplingParams(),
             generator=None,
             generated_tokens=1,
-            block_ids=[0],
+            block_ids=[[0]],
         )
         runner._request_states["r0"] = req_state
         scheduler_output = self._make_scheduler_output(
@@ -1459,7 +1485,7 @@ class TestV1MetalModelRunnerExecuteModel:
         with pytest.raises(NotImplementedError, match="scheduler-invalid"):
             runner.execute_model(scheduler_output)
 
-        assert req_state.block_ids == [0]
+        assert req_state.block_ids == [[0]]
         assert "new" not in runner._request_states
 
     def test_gemma4_mtp_async_scheduling_fails_before_request_setup(self) -> None:
@@ -1576,7 +1602,7 @@ class TestV1MetalModelRunnerGDNSubmit:
                     req_id="pool-0",
                     token_ids=[1],
                     sampling_params=SamplingParams(),
-                    block_ids=[0],
+                    block_ids=[[0]],
                     generator=None,
                     prompt_len=1,
                     start_pos=0,
@@ -1615,7 +1641,7 @@ class TestV1MetalModelRunnerGDNSubmit:
                     req_id="pp-0",
                     token_ids=[1],
                     sampling_params=SamplingParams(),
-                    block_ids=[0],
+                    block_ids=[[0]],
                     generator=None,
                     prompt_len=1,
                     start_pos=0,
@@ -1814,6 +1840,8 @@ class TestV1MetalModelRunnerGDNLifecycle:
         runner = make_stub_runner(_paged_attention_runtime=runtime)
         runner.num_layers = 0
         runner._paged_block_size = 4
+        runner._paged_group_block_sizes = (4,)
+        runner._paged_scheduler_group_indices = (0,)
         runner._paged_request_seq_lens["decode-0"] = 1
 
         captured: dict[str, object] = {}
@@ -1836,12 +1864,12 @@ class TestV1MetalModelRunnerGDNLifecycle:
             generator=None,
             generated_tokens=1,
         )
-        decode_state.block_ids = [0]
+        decode_state.block_ids = [[0]]
         prefill = mr.PrefillRequest(
             req_id="prefill-0",
             token_ids=[9],
             sampling_params=SamplingParams(),
-            block_ids=[1],
+            block_ids=[[1]],
             generator=None,
             prompt_len=1,
             start_pos=0,
