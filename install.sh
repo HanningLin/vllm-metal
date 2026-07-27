@@ -1,5 +1,11 @@
 #!/bin/bash
 
+# Pinned by full URL because no index serves it: PyPI's vllm has no macOS
+# wheel yet. To bump, raise VLLM_VERSION to a release that attaches one —
+# not every release does; v0.26.0 was the first.
+VLLM_VERSION="0.26.0"
+VLLM_WHEEL_URL="https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}%2Bcpu-cp312-cp312-macosx_11_0_arm64.whl"
+
 _cleanup_dirs=()
 
 register_cleanup_dir() {
@@ -57,6 +63,21 @@ try:
 except Exception as e:
     print('', file=sys.stderr)
 "
+}
+
+install_vllm() {
+  echo ""
+  section "Installing vLLM core"
+  echo "Wheel: vLLM ${VLLM_VERSION} (prebuilt macOS arm64)"
+
+  # The wheel's own metadata pulls torch et al. from PyPI.
+  if ! uv pip install "$VLLM_WHEEL_URL"; then
+    error "Failed to install vLLM core from ${VLLM_WHEEL_URL}"
+    echo "Please check your internet connection and try again." >&2
+    exit 1
+  fi
+
+  success "Installed vLLM core"
 }
 
 download_and_install_wheel() {
@@ -165,21 +186,7 @@ EOF
     exit 1
   fi
 
-  local vllm_v="0.26.0"
-  local url_base="https://github.com/vllm-project/vllm/releases/download"
-  local filename="vllm-$vllm_v.tar.gz"
-  local vllm_tmp_dir
-  vllm_tmp_dir=$(mktemp -d)
-  register_cleanup_dir "$vllm_tmp_dir"
-  local vllm_src_dir="$vllm_tmp_dir/vllm-$vllm_v"
-
-  curl -fSL "$url_base/v$vllm_v/$filename" -o "$vllm_tmp_dir/$filename"
-  tar xf "$vllm_tmp_dir/$filename" -C "$vllm_tmp_dir"
-  cd "$vllm_src_dir"
-
-  uv pip install -r requirements/cpu.txt --index-strategy unsafe-best-match
-  CXXFLAGS="-Wno-parentheses" uv pip install .
-  cd -
+  install_vllm
 
   if [[ -n "$local_lib" && -f "$local_lib" ]]; then
     # Local source install (running ./install.sh from a checkout). Prebuild the
