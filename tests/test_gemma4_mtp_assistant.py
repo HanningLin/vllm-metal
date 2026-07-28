@@ -154,15 +154,6 @@ def test_validate_records_tie_word_embeddings_contract() -> None:
     assert metadata.tie_word_embeddings is False
 
 
-def test_validate_accepts_top_level_gemma4_target_model_type() -> None:
-    metadata = _validate_assistant_config(
-        _assistant_config(),
-        target_model_args=_target_args(model_type="gemma4"),
-    )
-
-    assert metadata.backbone_hidden_size == 1536
-
-
 def test_validate_rejects_vocab_mismatch() -> None:
     with pytest.raises(ValueError, match="vocab size must match"):
         _validate_assistant_config(
@@ -176,14 +167,6 @@ def test_validate_rejects_assistant_top_level_vocab_mismatch() -> None:
         _validate_assistant_config(
             _assistant_config(vocab_size=32000),
             target_model_args=_target_args(),
-        )
-
-
-def test_validate_rejects_non_positive_target_size() -> None:
-    with pytest.raises(ValueError, match="target model hidden_size must be positive"):
-        _validate_assistant_config(
-            _assistant_config(),
-            target_model_args=_target_args(hidden_size=0),
         )
 
 
@@ -315,32 +298,6 @@ def test_validate_rejects_non_bool_assistant_config_values(field: str) -> None:
         )
 
 
-def test_validate_rejects_non_gemma4_target_model_type() -> None:
-    with pytest.raises(ValueError, match="Gemma4 target"):
-        _validate_assistant_config(
-            _assistant_config(),
-            target_model_args=_target_args(model_type="llama"),
-        )
-
-
-def test_validate_rejects_missing_target_model_type() -> None:
-    with pytest.raises(ValueError, match="model_type=None"):
-        _validate_assistant_config(
-            _assistant_config(),
-            target_model_args={
-                "vocab_size": 262144,
-                "hidden_size": 1536,
-                "num_kv_shared_layers": 0,
-                "layer_types": [
-                    "sliding_attention",
-                    "sliding_attention",
-                    "sliding_attention",
-                    "full_attention",
-                ],
-            },
-        )
-
-
 def test_validate_accepts_assistant_layer_types_tail_matching_target_non_shared_layers() -> (
     None
 ):
@@ -395,45 +352,6 @@ def test_validate_rejects_assistant_with_more_layers_than_target_non_shared() ->
         _validate_assistant_config(
             _assistant_config(),
             target_model_args=_target_args(num_kv_shared_layers=3),
-        )
-
-
-def test_validate_rejects_target_layer_types_length_mismatch() -> None:
-    with pytest.raises(ValueError, match="layer_types must match num_hidden_layers"):
-        _validate_assistant_config(
-            _assistant_config(),
-            target_model_args=_target_args(
-                num_hidden_layers=5,
-                layer_types=[
-                    "sliding_attention",
-                    "sliding_attention",
-                    "sliding_attention",
-                    "full_attention",
-                ],
-            ),
-        )
-
-
-def test_validate_rejects_target_with_no_non_shared_kv_layers() -> None:
-    with pytest.raises(ValueError, match="leave at least one non-shared KV layer"):
-        _validate_assistant_config(
-            _assistant_config(),
-            target_model_args=_target_args(num_kv_shared_layers=4),
-        )
-
-
-def test_validate_rejects_unknown_target_layer_types() -> None:
-    with pytest.raises(ValueError, match="Unsupported Gemma4 MTP target layer types"):
-        _validate_assistant_config(
-            _assistant_config(),
-            target_model_args=_target_args(
-                layer_types=[
-                    "sliding_attention",
-                    "unknown_attention",
-                    "sliding_attention",
-                    "full_attention",
-                ],
-            ),
         )
 
 

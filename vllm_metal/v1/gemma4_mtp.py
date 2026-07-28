@@ -30,7 +30,6 @@ GEMMA4_MTP_DRAFT_MODEL_TYPES = frozenset({"gemma4_assistant", "gemma4_mtp"})
 GEMMA4_MTP_DRAFT_ARCHITECTURES = frozenset(
     {"Gemma4AssistantForCausalLM", "Gemma4MTPModel"}
 )
-GEMMA4_TARGET_MODEL_TYPES = frozenset({"gemma4", "gemma4_text"})
 GEMMA4_MTP_TEXT_MODEL_TYPE = "gemma4_text"
 GEMMA4_MTP_VALID_LAYER_TYPES = frozenset({"sliding_attention", "full_attention"})
 
@@ -482,7 +481,7 @@ class Gemma4MTPAssistantSource:
 
 @dataclass(frozen=True, slots=True)
 class Gemma4MTPTargetMetadata:
-    """Validated target model metadata needed by Gemma4 MTP."""
+    """Target model metadata needed by Gemma4 MTP."""
 
     vocab_size: int
     hidden_size: int
@@ -493,53 +492,13 @@ class Gemma4MTPTargetMetadata:
         cls,
         target_model_args: Mapping[str, Any],
     ) -> Gemma4MTPTargetMetadata:
-        model_type = target_model_args.get("model_type")
-        if model_type not in GEMMA4_TARGET_MODEL_TYPES:
-            raise ValueError(
-                "Gemma4 MTP assistant requires a Gemma4 target model, "
-                f"got model_type={model_type!r}"
-            )
-
-        vocab_size = int(target_model_args["vocab_size"])
-        if vocab_size <= 0:
-            raise ValueError(
-                f"target model vocab_size must be positive, got {vocab_size}"
-            )
-        hidden_size = int(target_model_args["hidden_size"])
-        if hidden_size <= 0:
-            raise ValueError(
-                f"target model hidden_size must be positive, got {hidden_size}"
-            )
-        layer_types = tuple(target_model_args["layer_types"])
-        if not layer_types:
-            raise ValueError("Gemma4 MTP target model must expose layer_types")
-        unknown_layer_types = sorted(set(layer_types) - GEMMA4_MTP_VALID_LAYER_TYPES)
-        if unknown_layer_types:
-            raise ValueError(
-                f"Unsupported Gemma4 MTP target layer types: {unknown_layer_types}"
-            )
-
-        num_hidden_layers = int(target_model_args["num_hidden_layers"])
-        if len(layer_types) != num_hidden_layers:
-            raise ValueError(
-                "Gemma4 MTP target layer_types must match num_hidden_layers: "
-                f"len(layer_types)={len(layer_types)}, "
-                f"num_hidden_layers={num_hidden_layers}"
-            )
-
-        num_kv_shared_layers = int(target_model_args.get("num_kv_shared_layers", 0))
-        if num_kv_shared_layers < 0 or num_kv_shared_layers >= len(layer_types):
-            raise ValueError(
-                "Gemma4 MTP target num_kv_shared_layers must leave at least one "
-                f"non-shared KV layer: num_kv_shared_layers={num_kv_shared_layers}, "
-                f"num_layers={len(layer_types)}"
-            )
-
+        layer_types = target_model_args["layer_types"]
+        num_kv_shared_layers = target_model_args.get("num_kv_shared_layers", 0)
         num_non_shared = len(layer_types) - num_kv_shared_layers
         return cls(
-            vocab_size=vocab_size,
-            hidden_size=hidden_size,
-            non_shared_layer_types=layer_types[:num_non_shared],
+            vocab_size=target_model_args["vocab_size"],
+            hidden_size=target_model_args["hidden_size"],
+            non_shared_layer_types=tuple(layer_types[:num_non_shared]),
         )
 
 
