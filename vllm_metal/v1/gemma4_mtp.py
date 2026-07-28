@@ -494,6 +494,11 @@ class Gemma4MTPTargetMetadata:
     ) -> Gemma4MTPTargetMetadata:
         layer_types = target_model_args["layer_types"]
         num_kv_shared_layers = target_model_args.get("num_kv_shared_layers", 0)
+        if not 0 <= num_kv_shared_layers < len(layer_types):
+            raise ValueError(
+                "Gemma4 target num_kv_shared_layers must leave at least one "
+                "non-shared KV layer"
+            )
         num_non_shared = len(layer_types) - num_kv_shared_layers
         return cls(
             vocab_size=target_model_args["vocab_size"],

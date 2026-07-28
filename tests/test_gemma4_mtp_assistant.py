@@ -355,6 +355,14 @@ def test_validate_rejects_assistant_with_more_layers_than_target_non_shared() ->
         )
 
 
+def test_validate_rejects_target_kv_shared_layers_past_layer_count() -> None:
+    with pytest.raises(ValueError, match="leave at least one non-shared KV layer"):
+        _validate_assistant_config(
+            _assistant_config(),
+            target_model_args=_target_args(num_kv_shared_layers=5),
+        )
+
+
 def test_validate_rejects_malformed_assistant_layer_types() -> None:
     text_config = _assistant_config()["text_config"]
     assert isinstance(text_config, dict)
