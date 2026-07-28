@@ -673,6 +673,7 @@ class TestModelLifecycle:
             "model_type": "gemma4_text",
             "vocab_size": 32000,
             "hidden_size": 4096,
+            "num_hidden_layers": 1,
             "num_kv_shared_layers": 0,
             "layer_types": ["full_attention"],
         }
@@ -683,12 +684,10 @@ class TestModelLifecycle:
 
         first = loader.load_if_needed(
             speculative_config=spec_config,
-            target_hf_config=None,
             target_model_args=target_args,
         )
         second = loader.load_if_needed(
             speculative_config=spec_config,
-            target_hf_config=None,
             target_model_args=target_args,
         )
         assert first is second
@@ -698,7 +697,6 @@ class TestModelLifecycle:
 
         third = loader.load_if_needed(
             speculative_config=spec_config,
-            target_hf_config=None,
             target_model_args=target_args,
         )
         assert third is not first
