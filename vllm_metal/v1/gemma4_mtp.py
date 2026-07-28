@@ -635,11 +635,15 @@ class _Gemma4MTPAssistantConfigParser:
             "vocab_size",
             context="assistant",
         )
-        top_level_vocab_size = self._optional_positive_int(
+        top_level_vocab_size = self._optional_int(
             config,
             "vocab_size",
             context="assistant",
         )
+        if top_level_vocab_size is not None and top_level_vocab_size <= 0:
+            raise ValueError(
+                f"assistant vocab_size must be positive, got {top_level_vocab_size}"
+            )
         if top_level_vocab_size is not None and top_level_vocab_size != vocab_size:
             raise ValueError(
                 "Gemma4 MTP assistant vocab_size metadata mismatch: "
@@ -712,21 +716,19 @@ class _Gemma4MTPAssistantConfigParser:
         vocab_size: int,
         use_ordered_embeddings: bool,
     ) -> None:
-        num_centroids = _Gemma4MTPAssistantConfigParser._optional_positive_int(
+        if not use_ordered_embeddings:
+            return
+
+        num_centroids = _Gemma4MTPAssistantConfigParser._optional_int(
             config,
             "num_centroids",
             context="assistant",
         )
-        centroid_intermediate_top_k = (
-            _Gemma4MTPAssistantConfigParser._optional_positive_int(
-                config,
-                "centroid_intermediate_top_k",
-                context="assistant",
-            )
+        centroid_intermediate_top_k = _Gemma4MTPAssistantConfigParser._optional_int(
+            config,
+            "centroid_intermediate_top_k",
+            context="assistant",
         )
-        if not use_ordered_embeddings:
-            return
-
         num_centroids = (
             GEMMA4_MTP_DEFAULT_NUM_CENTROIDS if num_centroids is None else num_centroids
         )
@@ -735,6 +737,15 @@ class _Gemma4MTPAssistantConfigParser:
             if centroid_intermediate_top_k is None
             else centroid_intermediate_top_k
         )
+        if num_centroids <= 0:
+            raise ValueError(
+                f"assistant num_centroids must be positive, got {num_centroids}"
+            )
+        if centroid_intermediate_top_k <= 0:
+            raise ValueError(
+                "assistant centroid_intermediate_top_k must be positive, "
+                f"got {centroid_intermediate_top_k}"
+            )
         if vocab_size % num_centroids != 0:
             raise ValueError(
                 "Gemma4 MTP assistant vocab_size must be divisible by "
@@ -786,19 +797,6 @@ class _Gemma4MTPAssistantConfigParser:
             key=key,
             context=context,
         )
-
-    @staticmethod
-    def _optional_positive_int(config: Any, key: str, *, context: str) -> int | None:
-        value = _Gemma4MTPAssistantConfigParser._optional_int(
-            config,
-            key,
-            context=context,
-        )
-        if value is None:
-            return None
-        if value <= 0:
-            raise ValueError(f"{context} {key} must be positive, got {value}")
-        return value
 
     @staticmethod
     def _optional_bool(config: Any, key: str, *, context: str, default: bool) -> bool:

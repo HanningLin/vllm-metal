@@ -283,6 +283,19 @@ def test_validate_rejects_ordered_embedding_top_k_above_centroids() -> None:
         )
 
 
+def test_validate_ignores_ordered_embedding_fields_when_disabled() -> None:
+    metadata = _validate_assistant_config(
+        _assistant_config(
+            use_ordered_embeddings=False,
+            num_centroids=0,
+            centroid_intermediate_top_k=0,
+        ),
+        target_model_args=_target_args(),
+    )
+
+    assert metadata.use_ordered_embeddings is False
+
+
 def test_validate_rejects_bool_assistant_config_values() -> None:
     text_config = _assistant_config()["text_config"]
     assert isinstance(text_config, dict)
