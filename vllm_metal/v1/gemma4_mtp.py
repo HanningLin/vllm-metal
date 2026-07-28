@@ -55,7 +55,10 @@ class Gemma4MTPAssistantRuntime:
     model: Any
     metadata: Gemma4MTPAssistantMetadata
     kv_sharing: Gemma4MTPKVSharingBinding | None = None
-    forward_ready: bool = False
+
+    @property
+    def forward_ready(self) -> bool:
+        return self.kv_sharing is not None
 
     @property
     def kv_sharing_plan(self) -> Gemma4MTPKVSharingPlan | None:
@@ -87,7 +90,6 @@ class Gemma4MTPAssistantRuntime:
                 block_size=block_size,
                 group_block_sizes=group_block_sizes,
             ),
-            forward_ready=hasattr(self.model, "draft_token_ids"),
         )
 
     def propose_draft_token_ids(
@@ -102,8 +104,6 @@ class Gemma4MTPAssistantRuntime:
             return []
         if self.kv_sharing is None:
             raise RuntimeError("Gemma4 MTP assistant requires target KV sharing")
-        if not self.forward_ready:
-            raise RuntimeError("Gemma4 MTP assistant forward is not ready")
 
         if len(target_hidden_states.shape) == 3:
             if target_hidden_states.shape[0] != 1:
@@ -499,26 +499,17 @@ class Gemma4MTPTargetMetadata:
                 "Gemma4 MTP assistant requires a Gemma4 target model, "
                 f"got model_type={model_type!r}"
             )
-        return cls(
-            vocab_size=cls._required_positive_int("vocab_size", target_model_args),
-            hidden_size=cls._required_positive_int("hidden_size", target_model_args),
-            non_shared_layer_types=cls._non_shared_layer_types(target_model_args),
-        )
 
-    @staticmethod
-    def _required_positive_int(
-        key: str,
-        target_model_args: Mapping[str, Any],
-    ) -> int:
-        value = int(target_model_args[key])
-        if value <= 0:
-            raise ValueError(f"target model {key} must be positive, got {value}")
-        return value
-
-    @staticmethod
-    def _non_shared_layer_types(
-        target_model_args: Mapping[str, Any],
-    ) -> tuple[str, ...]:
+        vocab_size = int(target_model_args["vocab_size"])
+        if vocab_size <= 0:
+            raise ValueError(
+                f"target model vocab_size must be positive, got {vocab_size}"
+            )
+        hidden_size = int(target_model_args["hidden_size"])
+        if hidden_size <= 0:
+            raise ValueError(
+                f"target model hidden_size must be positive, got {hidden_size}"
+            )
         layer_types = tuple(target_model_args["layer_types"])
         if not layer_types:
             raise ValueError("Gemma4 MTP target model must expose layer_types")
@@ -545,7 +536,11 @@ class Gemma4MTPTargetMetadata:
             )
 
         num_non_shared = len(layer_types) - num_kv_shared_layers
-        return layer_types[:num_non_shared]
+        return cls(
+            vocab_size=vocab_size,
+            hidden_size=hidden_size,
+            non_shared_layer_types=layer_types[:num_non_shared],
+        )
 
 
 @dataclass(frozen=True, slots=True)
