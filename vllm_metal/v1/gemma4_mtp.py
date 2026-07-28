@@ -257,7 +257,6 @@ class Gemma4MTPAssistantLoader:
         self,
         *,
         speculative_config: Any | None,
-        target_hf_config: Any | None,
         target_model_args: Mapping[str, Any],
     ) -> Gemma4MTPAssistantRuntime | None:
         """Load the Gemma4 MTP assistant configured for this target model."""
@@ -267,10 +266,7 @@ class Gemma4MTPAssistantLoader:
         source = Gemma4MTPAssistantSource.from_speculative_config(speculative_config)
         if self._model_path_resolver is not None:
             source = source.resolve(self._model_path_resolver)
-        target_metadata = Gemma4MTPTargetMetadata.from_configs(
-            target_hf_config=target_hf_config,
-            target_model_args=target_model_args,
-        )
+        target_metadata = Gemma4MTPTargetMetadata.from_model_args(target_model_args)
 
         cached = self._cached_runtime(source)
         if cached is not None:
@@ -493,81 +489,37 @@ class Gemma4MTPTargetMetadata:
     non_shared_layer_types: tuple[str, ...]
 
     @classmethod
-    def from_configs(
+    def from_model_args(
         cls,
-        *,
-        target_hf_config: Any | None,
         target_model_args: Mapping[str, Any],
     ) -> Gemma4MTPTargetMetadata:
-        target_text_config = _text_config(target_hf_config)
-        cls._validate_model_types(target_text_config, target_model_args)
+        model_type = target_model_args.get("model_type")
+        if model_type not in GEMMA4_TARGET_MODEL_TYPES:
+            raise ValueError(
+                "Gemma4 MTP assistant requires a Gemma4 target model, "
+                f"got model_type={model_type!r}"
+            )
         return cls(
-            vocab_size=cls._required_positive_int(
-                "vocab_size",
-                target_text_config,
-                target_model_args,
-            ),
-            hidden_size=cls._required_positive_int(
-                "hidden_size",
-                target_text_config,
-                target_model_args,
-            ),
-            non_shared_layer_types=cls._non_shared_layer_types(
-                target_text_config,
-                target_model_args,
-            ),
+            vocab_size=cls._required_positive_int("vocab_size", target_model_args),
+            hidden_size=cls._required_positive_int("hidden_size", target_model_args),
+            non_shared_layer_types=cls._non_shared_layer_types(target_model_args),
         )
 
     @staticmethod
-    def _validate_model_types(
-        target_text_config: Any | None,
-        target_model_args: Mapping[str, Any],
-    ) -> None:
-        model_types = {
-            model_type
-            for model_type in (
-                _config_value(target_text_config, "model_type"),
-                target_model_args.get("model_type"),
-            )
-            if model_type is not None
-        }
-        if not model_types:
-            raise ValueError(
-                "Gemma4 MTP assistant requires a Gemma4 target model, "
-                "got model_type=None"
-            )
-        unknown_model_types = sorted(model_types - GEMMA4_TARGET_MODEL_TYPES)
-        if unknown_model_types:
-            raise ValueError(
-                "Gemma4 MTP assistant requires a Gemma4 target model, got "
-                f"model_type={unknown_model_types[0]!r}"
-            )
-
-    @classmethod
     def _required_positive_int(
-        cls,
         key: str,
-        target_text_config: Any | None,
         target_model_args: Mapping[str, Any],
     ) -> int:
-        value = cls._matching_optional_int(key, target_text_config, target_model_args)
-        if value is None:
-            raise ValueError(f"Missing target model {key}")
+        value = int(target_model_args[key])
         if value <= 0:
             raise ValueError(f"target model {key} must be positive, got {value}")
         return value
 
-    @classmethod
+    @staticmethod
     def _non_shared_layer_types(
-        cls,
-        target_text_config: Any | None,
         target_model_args: Mapping[str, Any],
     ) -> tuple[str, ...]:
-        layer_types = cls._matching_sequence(
-            "layer_types",
-            target_text_config,
-            target_model_args,
-        )
+        layer_types = tuple(target_model_args["layer_types"])
         if not layer_types:
             raise ValueError("Gemma4 MTP target model must expose layer_types")
         unknown_layer_types = sorted(set(layer_types) - GEMMA4_MTP_VALID_LAYER_TYPES)
@@ -576,25 +528,15 @@ class Gemma4MTPTargetMetadata:
                 f"Unsupported Gemma4 MTP target layer types: {unknown_layer_types}"
             )
 
-        num_hidden_layers = cls._matching_optional_int(
-            "num_hidden_layers",
-            target_text_config,
-            target_model_args,
-        )
-        if num_hidden_layers is not None and len(layer_types) != num_hidden_layers:
+        num_hidden_layers = int(target_model_args["num_hidden_layers"])
+        if len(layer_types) != num_hidden_layers:
             raise ValueError(
                 "Gemma4 MTP target layer_types must match num_hidden_layers: "
                 f"len(layer_types)={len(layer_types)}, "
                 f"num_hidden_layers={num_hidden_layers}"
             )
 
-        num_kv_shared_layers = cls._matching_optional_int(
-            "num_kv_shared_layers",
-            target_text_config,
-            target_model_args,
-        )
-        if num_kv_shared_layers is None:
-            num_kv_shared_layers = 0
+        num_kv_shared_layers = int(target_model_args.get("num_kv_shared_layers", 0))
         if num_kv_shared_layers < 0 or num_kv_shared_layers >= len(layer_types):
             raise ValueError(
                 "Gemma4 MTP target num_kv_shared_layers must leave at least one "
@@ -604,84 +546,6 @@ class Gemma4MTPTargetMetadata:
 
         num_non_shared = len(layer_types) - num_kv_shared_layers
         return layer_types[:num_non_shared]
-
-    @classmethod
-    def _matching_optional_int(
-        cls,
-        key: str,
-        target_text_config: Any | None,
-        target_model_args: Mapping[str, Any],
-    ) -> int | None:
-        return cls._matching_value(
-            key,
-            target_text_config,
-            target_model_args,
-            parse=cls._optional_int,
-        )
-
-    @classmethod
-    def _matching_sequence(
-        cls,
-        key: str,
-        target_text_config: Any | None,
-        target_model_args: Mapping[str, Any],
-    ) -> tuple[str, ...]:
-        return (
-            cls._matching_value(
-                key,
-                target_text_config,
-                target_model_args,
-                parse=cls._sequence_field,
-            )
-            or ()
-        )
-
-    @staticmethod
-    def _matching_value[T](
-        key: str,
-        target_text_config: Any | None,
-        target_model_args: Mapping[str, Any],
-        *,
-        parse: Callable[[Any, str], T],
-    ) -> T | None:
-        sources: list[tuple[str, T]] = []
-        if key in target_model_args and target_model_args.get(key) is not None:
-            sources.append(("target_model_args", parse(target_model_args, key)))
-        if _config_value(target_text_config, key) is not None:
-            sources.append(
-                ("target_hf_config.text_config", parse(target_text_config, key))
-            )
-        if not sources:
-            return None
-
-        _, value = sources[0]
-        for label, other in sources[1:]:
-            if other != value:
-                raise ValueError(
-                    f"Gemma4 MTP target {key} metadata mismatch: "
-                    f"{sources[0][0]}={value}, {label}={other}"
-                )
-        return value
-
-    @staticmethod
-    def _optional_int(config: Any, key: str) -> int | None:
-        value = _config_value(config, key)
-        if value is None:
-            return None
-        if isinstance(value, bool) or not isinstance(value, Integral):
-            raise ValueError(f"target model {key} must be an integer, got {value!r}")
-        return int(value)
-
-    @staticmethod
-    def _sequence_field(config: Any, key: str) -> tuple[str, ...]:
-        value = _config_value(config, key, ()) or ()
-        if isinstance(value, str):
-            raise ValueError(f"{key} must be a non-string sequence")
-        if not isinstance(value, Sequence):
-            raise ValueError(f"{key} must be a sequence")
-        if any(not isinstance(item, str) for item in value):
-            raise ValueError(f"{key} entries must be strings")
-        return tuple(value)
 
 
 @dataclass(frozen=True, slots=True)

@@ -444,7 +444,6 @@ class ModelLifecycle:
         runner._gemma4_mtp_assistant = None
         gemma4_mtp_assistant = Gemma4MTPAssistantLoader().load_if_needed(
             speculative_config=runner.vllm_config.speculative_config,
-            target_hf_config=request.hf_config,
             target_model_args=model_args,
         )
         runner.kv_cache_dtype = request.target_dtype
