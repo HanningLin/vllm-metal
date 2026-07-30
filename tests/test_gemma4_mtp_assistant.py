@@ -327,11 +327,13 @@ def test_validate_accepts_assistant_layer_types_tail_matching_target_non_shared_
 def test_validate_rejects_layer_types_not_tail_matching_target_non_shared_layers() -> (
     None
 ):
+    text_config = _assistant_config()["text_config"]
+    assert isinstance(text_config, dict)
     with pytest.raises(ValueError, match="tail-match"):
         _validate_assistant_config(
             _assistant_config(
                 text_config={
-                    **_assistant_config()["text_config"],
+                    **text_config,
                     "num_hidden_layers": 1,
                     "layer_types": ["full_attention"],
                 }
@@ -352,6 +354,14 @@ def test_validate_rejects_assistant_with_more_layers_than_target_non_shared() ->
         _validate_assistant_config(
             _assistant_config(),
             target_model_args=_target_args(num_kv_shared_layers=3),
+        )
+
+
+def test_validate_rejects_non_gemma4_target_model_type() -> None:
+    with pytest.raises(ValueError, match="requires a Gemma4 target model"):
+        _validate_assistant_config(
+            _assistant_config(),
+            target_model_args=_target_args(model_type="qwen3"),
         )
 
 

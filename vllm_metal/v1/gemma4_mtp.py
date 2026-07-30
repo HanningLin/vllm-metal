@@ -30,6 +30,7 @@ GEMMA4_MTP_DRAFT_MODEL_TYPES = frozenset({"gemma4_assistant", "gemma4_mtp"})
 GEMMA4_MTP_DRAFT_ARCHITECTURES = frozenset(
     {"Gemma4AssistantForCausalLM", "Gemma4MTPModel"}
 )
+GEMMA4_TARGET_MODEL_TYPES = frozenset({"gemma4", "gemma4_text"})
 GEMMA4_MTP_TEXT_MODEL_TYPE = "gemma4_text"
 GEMMA4_MTP_VALID_LAYER_TYPES = frozenset({"sliding_attention", "full_attention"})
 
@@ -492,6 +493,12 @@ class Gemma4MTPTargetMetadata:
         cls,
         target_model_args: Mapping[str, Any],
     ) -> Gemma4MTPTargetMetadata:
+        model_type = target_model_args.get("model_type")
+        if model_type not in GEMMA4_TARGET_MODEL_TYPES:
+            raise ValueError(
+                "Gemma4 MTP assistant requires a Gemma4 target model, "
+                f"got model_type={model_type!r}"
+            )
         layer_types = target_model_args["layer_types"]
         num_kv_shared_layers = target_model_args.get("num_kv_shared_layers", 0)
         if not 0 <= num_kv_shared_layers < len(layer_types):
