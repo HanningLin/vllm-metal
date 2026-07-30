@@ -455,7 +455,7 @@ class ModelLifecycle:
         # its keys onto the top level so every key sits in one flat dict.
         model_args = getattr(model, "args", None)
         if model_args is not None:
-            model_values = self._config_to_mapping(model_args, label="model.args")
+            model_values = self._config_to_mapping(model_args)
         else:
             config = getattr(model, "config", None)
             if config is None:
@@ -464,12 +464,9 @@ class ModelLifecycle:
                     ".config attribute."
                 )
 
-            config_values = self._config_to_mapping(config, label="config")
+            config_values = self._config_to_mapping(config)
             if is_vlm and "text_config" in config_values:
-                model_values = self._config_to_mapping(
-                    config_values["text_config"],
-                    label="text_config",
-                )
+                model_values = self._config_to_mapping(config_values["text_config"])
             else:
                 model_values = config_values
 
@@ -478,42 +475,12 @@ class ModelLifecycle:
             return model_values
 
         merged_values = dict(model_values)
-        text_values = self._config_to_mapping(text_config, label="text_config")
+        text_values = self._config_to_mapping(text_config)
         for key, value in text_values.items():
             merged_values.setdefault(key, value)
         return merged_values
 
-    def _config_to_mapping(self, config: Any, *, label: str) -> dict[str, Any]:
-        missing = object()
-
+    def _config_to_mapping(self, config: Any) -> dict[str, Any]:
         if isinstance(config, Mapping):
             return dict(config)
-
-        to_dict = getattr(config, "to_dict", None)
-        if callable(to_dict):
-            values = to_dict()
-            if isinstance(values, Mapping):
-                return dict(values)
-            raise TypeError(f"{label}.to_dict() must return a mapping.")
-
-        instance_dict = getattr(config, "__dict__", None)
-        if instance_dict is not None:
-            return dict(instance_dict)
-
-        slot_values: dict[str, Any] = {}
-        for cls in type(config).__mro__:
-            slots = cls.__dict__.get("__slots__", ())
-            if isinstance(slots, str):
-                slots = (slots,)
-            for name in slots:
-                if not isinstance(name, str) or name.startswith("__"):
-                    continue
-                value = getattr(config, name, missing)
-                if value is not missing:
-                    slot_values[name] = value
-        if slot_values:
-            return slot_values
-
-        raise TypeError(
-            f"{label} must expose a mapping, to_dict(), __dict__, or __slots__."
-        )
+        return dict(vars(config))

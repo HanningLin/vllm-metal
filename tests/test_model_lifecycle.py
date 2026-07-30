@@ -42,42 +42,6 @@ def _reset_env(monkeypatch: pytest.MonkeyPatch):
     reset_config()
 
 
-class _BaseSlotTextConfig:
-    __slots__ = ("vocab_size", "num_hidden_layers", "num_attention_heads")
-
-    def __init__(
-        self,
-        *,
-        vocab_size: int,
-        num_hidden_layers: int,
-        num_attention_heads: int,
-    ) -> None:
-        self.vocab_size = vocab_size
-        self.num_hidden_layers = num_hidden_layers
-        self.num_attention_heads = num_attention_heads
-
-
-class _SlotTextConfig(_BaseSlotTextConfig):
-    __slots__ = ("num_key_value_heads", "hidden_size")
-
-    def __init__(
-        self,
-        *,
-        vocab_size: int,
-        num_hidden_layers: int,
-        num_attention_heads: int,
-        num_key_value_heads: int,
-        hidden_size: int,
-    ) -> None:
-        super().__init__(
-            vocab_size=vocab_size,
-            num_hidden_layers=num_hidden_layers,
-            num_attention_heads=num_attention_heads,
-        )
-        self.num_key_value_heads = num_key_value_heads
-        self.hidden_size = hidden_size
-
-
 def _runner_model_config(**overrides: object) -> object:
     values = {
         "model": "stub-model",
@@ -754,33 +718,6 @@ class TestModelLifecycle:
         assert runner.model_args["model_type"] == "gemma4"
         assert runner.model_args["vocab_size"] == _TEXT_MODEL_ARGS["vocab_size"]
 
-    def test_load_extracts_vlm_text_config_with_inherited_slots(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _stub_generation_model(
-            monkeypatch,
-            config=SimpleNamespace(
-                text_config=_SlotTextConfig(
-                    **_TEXT_MODEL_ARGS,
-                )
-            ),
-            is_vlm=True,
-        )
-        lifecycle, runner = _make_lifecycle(
-            model_config=_runner_model_config(
-                is_multimodal_model=True,
-            )
-        )
-
-        lifecycle.load()
-
-        assert runner._is_vlm is True
-        assert runner.model_args["vocab_size"] == 32000
-        assert runner.model_args["hidden_size"] == 4096
-        assert runner.num_layers == 32
-        assert runner.head_dim == 128
-
     def test_load_stt_model_loads_model(self, monkeypatch: pytest.MonkeyPatch) -> None:
         fake_model = SimpleNamespace(
             create_runtime_adapter=lambda model_name: (object(), model_name)
@@ -885,7 +822,9 @@ class TestModelLifecycle:
             assert len(mlx_lm_load_calls) == 1
             # The generic path must NOT pass ``model_config`` (which is
             # reserved for the AWQ owner's normalized quant config kwargs).
-            assert "model_config" not in mlx_lm_load_calls[0]["kwargs"]
+            kwargs = mlx_lm_load_calls[0]["kwargs"]
+            assert isinstance(kwargs, dict)
+            assert "model_config" not in kwargs
 
     def test_load_routes_gguf_to_owner_on_quantization_detection(
         self,
