@@ -55,7 +55,10 @@ class Gemma4MTPAssistantRuntime:
     model: Any
     metadata: Gemma4MTPAssistantMetadata
     kv_sharing: Gemma4MTPKVSharingBinding | None = None
-    forward_ready: bool = False
+
+    @property
+    def forward_ready(self) -> bool:
+        return self.kv_sharing is not None
 
     @property
     def kv_sharing_plan(self) -> Gemma4MTPKVSharingPlan | None:
@@ -87,7 +90,6 @@ class Gemma4MTPAssistantRuntime:
                 block_size=block_size,
                 group_block_sizes=group_block_sizes,
             ),
-            forward_ready=hasattr(self.model, "draft_token_ids"),
         )
 
     def propose_draft_token_ids(
@@ -102,8 +104,6 @@ class Gemma4MTPAssistantRuntime:
             return []
         if self.kv_sharing is None:
             raise RuntimeError("Gemma4 MTP assistant requires target KV sharing")
-        if not self.forward_ready:
-            raise RuntimeError("Gemma4 MTP assistant forward is not ready")
 
         if len(target_hidden_states.shape) == 3:
             if target_hidden_states.shape[0] != 1:
@@ -257,7 +257,6 @@ class Gemma4MTPAssistantLoader:
         self,
         *,
         speculative_config: Any | None,
-        target_hf_config: Any | None,
         target_model_args: Mapping[str, Any],
     ) -> Gemma4MTPAssistantRuntime | None:
         """Load the Gemma4 MTP assistant configured for this target model."""
@@ -267,10 +266,7 @@ class Gemma4MTPAssistantLoader:
         source = Gemma4MTPAssistantSource.from_speculative_config(speculative_config)
         if self._model_path_resolver is not None:
             source = source.resolve(self._model_path_resolver)
-        target_metadata = Gemma4MTPTargetMetadata.from_configs(
-            target_hf_config=target_hf_config,
-            target_model_args=target_model_args,
-        )
+        target_metadata = Gemma4MTPTargetMetadata.from_model_args(target_model_args)
 
         cached = self._cached_runtime(source)
         if cached is not None:
@@ -486,202 +482,36 @@ class Gemma4MTPAssistantSource:
 
 @dataclass(frozen=True, slots=True)
 class Gemma4MTPTargetMetadata:
-    """Validated target model metadata needed by Gemma4 MTP."""
+    """Target model metadata needed by Gemma4 MTP."""
 
     vocab_size: int
     hidden_size: int
     non_shared_layer_types: tuple[str, ...]
 
     @classmethod
-    def from_configs(
+    def from_model_args(
         cls,
-        *,
-        target_hf_config: Any | None,
         target_model_args: Mapping[str, Any],
     ) -> Gemma4MTPTargetMetadata:
-        target_text_config = _text_config(target_hf_config)
-        cls._validate_model_types(target_text_config, target_model_args)
-        return cls(
-            vocab_size=cls._required_positive_int(
-                "vocab_size",
-                target_text_config,
-                target_model_args,
-            ),
-            hidden_size=cls._required_positive_int(
-                "hidden_size",
-                target_text_config,
-                target_model_args,
-            ),
-            non_shared_layer_types=cls._non_shared_layer_types(
-                target_text_config,
-                target_model_args,
-            ),
-        )
-
-    @staticmethod
-    def _validate_model_types(
-        target_text_config: Any | None,
-        target_model_args: Mapping[str, Any],
-    ) -> None:
-        model_types = {
-            model_type
-            for model_type in (
-                _config_value(target_text_config, "model_type"),
-                target_model_args.get("model_type"),
-            )
-            if model_type is not None
-        }
-        if not model_types:
+        model_type = target_model_args.get("model_type")
+        if model_type not in GEMMA4_TARGET_MODEL_TYPES:
             raise ValueError(
                 "Gemma4 MTP assistant requires a Gemma4 target model, "
-                "got model_type=None"
+                f"got model_type={model_type!r}"
             )
-        unknown_model_types = sorted(model_types - GEMMA4_TARGET_MODEL_TYPES)
-        if unknown_model_types:
+        layer_types = target_model_args["layer_types"]
+        num_kv_shared_layers = target_model_args.get("num_kv_shared_layers", 0)
+        if not 0 <= num_kv_shared_layers < len(layer_types):
             raise ValueError(
-                "Gemma4 MTP assistant requires a Gemma4 target model, got "
-                f"model_type={unknown_model_types[0]!r}"
+                "Gemma4 target num_kv_shared_layers must leave at least one "
+                "non-shared KV layer"
             )
-
-    @classmethod
-    def _required_positive_int(
-        cls,
-        key: str,
-        target_text_config: Any | None,
-        target_model_args: Mapping[str, Any],
-    ) -> int:
-        value = cls._matching_optional_int(key, target_text_config, target_model_args)
-        if value is None:
-            raise ValueError(f"Missing target model {key}")
-        if value <= 0:
-            raise ValueError(f"target model {key} must be positive, got {value}")
-        return value
-
-    @classmethod
-    def _non_shared_layer_types(
-        cls,
-        target_text_config: Any | None,
-        target_model_args: Mapping[str, Any],
-    ) -> tuple[str, ...]:
-        layer_types = cls._matching_sequence(
-            "layer_types",
-            target_text_config,
-            target_model_args,
-        )
-        if not layer_types:
-            raise ValueError("Gemma4 MTP target model must expose layer_types")
-        unknown_layer_types = sorted(set(layer_types) - GEMMA4_MTP_VALID_LAYER_TYPES)
-        if unknown_layer_types:
-            raise ValueError(
-                f"Unsupported Gemma4 MTP target layer types: {unknown_layer_types}"
-            )
-
-        num_hidden_layers = cls._matching_optional_int(
-            "num_hidden_layers",
-            target_text_config,
-            target_model_args,
-        )
-        if num_hidden_layers is not None and len(layer_types) != num_hidden_layers:
-            raise ValueError(
-                "Gemma4 MTP target layer_types must match num_hidden_layers: "
-                f"len(layer_types)={len(layer_types)}, "
-                f"num_hidden_layers={num_hidden_layers}"
-            )
-
-        num_kv_shared_layers = cls._matching_optional_int(
-            "num_kv_shared_layers",
-            target_text_config,
-            target_model_args,
-        )
-        if num_kv_shared_layers is None:
-            num_kv_shared_layers = 0
-        if num_kv_shared_layers < 0 or num_kv_shared_layers >= len(layer_types):
-            raise ValueError(
-                "Gemma4 MTP target num_kv_shared_layers must leave at least one "
-                f"non-shared KV layer: num_kv_shared_layers={num_kv_shared_layers}, "
-                f"num_layers={len(layer_types)}"
-            )
-
         num_non_shared = len(layer_types) - num_kv_shared_layers
-        return layer_types[:num_non_shared]
-
-    @classmethod
-    def _matching_optional_int(
-        cls,
-        key: str,
-        target_text_config: Any | None,
-        target_model_args: Mapping[str, Any],
-    ) -> int | None:
-        return cls._matching_value(
-            key,
-            target_text_config,
-            target_model_args,
-            parse=cls._optional_int,
+        return cls(
+            vocab_size=target_model_args["vocab_size"],
+            hidden_size=target_model_args["hidden_size"],
+            non_shared_layer_types=tuple(layer_types[:num_non_shared]),
         )
-
-    @classmethod
-    def _matching_sequence(
-        cls,
-        key: str,
-        target_text_config: Any | None,
-        target_model_args: Mapping[str, Any],
-    ) -> tuple[str, ...]:
-        return (
-            cls._matching_value(
-                key,
-                target_text_config,
-                target_model_args,
-                parse=cls._sequence_field,
-            )
-            or ()
-        )
-
-    @staticmethod
-    def _matching_value[T](
-        key: str,
-        target_text_config: Any | None,
-        target_model_args: Mapping[str, Any],
-        *,
-        parse: Callable[[Any, str], T],
-    ) -> T | None:
-        sources: list[tuple[str, T]] = []
-        if key in target_model_args and target_model_args.get(key) is not None:
-            sources.append(("target_model_args", parse(target_model_args, key)))
-        if _config_value(target_text_config, key) is not None:
-            sources.append(
-                ("target_hf_config.text_config", parse(target_text_config, key))
-            )
-        if not sources:
-            return None
-
-        _, value = sources[0]
-        for label, other in sources[1:]:
-            if other != value:
-                raise ValueError(
-                    f"Gemma4 MTP target {key} metadata mismatch: "
-                    f"{sources[0][0]}={value}, {label}={other}"
-                )
-        return value
-
-    @staticmethod
-    def _optional_int(config: Any, key: str) -> int | None:
-        value = _config_value(config, key)
-        if value is None:
-            return None
-        if isinstance(value, bool) or not isinstance(value, Integral):
-            raise ValueError(f"target model {key} must be an integer, got {value!r}")
-        return int(value)
-
-    @staticmethod
-    def _sequence_field(config: Any, key: str) -> tuple[str, ...]:
-        value = _config_value(config, key, ()) or ()
-        if isinstance(value, str):
-            raise ValueError(f"{key} must be a non-string sequence")
-        if not isinstance(value, Sequence):
-            raise ValueError(f"{key} must be a sequence")
-        if any(not isinstance(item, str) for item in value):
-            raise ValueError(f"{key} entries must be strings")
-        return tuple(value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -701,11 +531,111 @@ class Gemma4MTPAssistantMetadata:
     @classmethod
     def is_assistant_config(cls, config: Any | None) -> bool:
         """Accept raw assistant configs and upstream vLLM's wrapper config."""
-        return _Gemma4MTPAssistantConfigParser._is_assistant_config(config)
+        if config is None:
+            return False
+        model_type = _config_value(config, "model_type")
+        if model_type in GEMMA4_MTP_DRAFT_MODEL_TYPES:
+            return True
+        return any(
+            arch in GEMMA4_MTP_DRAFT_ARCHITECTURES
+            for arch in cls._architectures(config, strict=False)
+        )
 
     @classmethod
     def from_config(cls, config: Any) -> Gemma4MTPAssistantMetadata:
-        return _Gemma4MTPAssistantConfigParser().parse(config)
+        model_type = _config_value(config, "model_type")
+        if model_type not in GEMMA4_MTP_DRAFT_MODEL_TYPES:
+            raise ValueError(
+                "Gemma4 MTP assistant requires a gemma4_assistant or gemma4_mtp "
+                f"config, got model_type={model_type!r}"
+            )
+
+        text_config = _text_config(config)
+        text_model_type = _config_value(text_config, "model_type")
+        if text_model_type != GEMMA4_MTP_TEXT_MODEL_TYPE:
+            raise ValueError(
+                "Gemma4 MTP assistant text_config.model_type must be "
+                f"{GEMMA4_MTP_TEXT_MODEL_TYPE!r}, got {text_model_type!r}"
+            )
+
+        vocab_size = cls._required_positive_int(
+            text_config,
+            "vocab_size",
+            context="assistant",
+        )
+        top_level_vocab_size = cls._optional_int(
+            config,
+            "vocab_size",
+            context="assistant",
+        )
+        if top_level_vocab_size is not None and top_level_vocab_size <= 0:
+            raise ValueError(
+                f"assistant vocab_size must be positive, got {top_level_vocab_size}"
+            )
+        if top_level_vocab_size is not None and top_level_vocab_size != vocab_size:
+            raise ValueError(
+                "Gemma4 MTP assistant vocab_size metadata mismatch: "
+                f"top-level={top_level_vocab_size}, text_config={vocab_size}"
+            )
+
+        hidden_size = cls._required_positive_int(
+            text_config,
+            "hidden_size",
+            context="assistant",
+        )
+        backbone_hidden_size = cls._required_positive_int(
+            config,
+            "backbone_hidden_size",
+            context="assistant",
+        )
+        num_hidden_layers = cls._required_positive_int(
+            text_config,
+            "num_hidden_layers",
+            context="assistant",
+        )
+        layer_types = cls._required_layer_types(text_config, num_hidden_layers)
+        architectures = cls._architectures(config, strict=True)
+        if not any(arch in GEMMA4_MTP_DRAFT_ARCHITECTURES for arch in architectures):
+            raise ValueError(
+                "Gemma4 MTP assistant requires a Gemma4 MTP architecture, got "
+                f"architectures={architectures!r}"
+            )
+
+        n_predict = cls._optional_int(config, "n_predict", context="assistant")
+        if n_predict is not None and n_predict != GEMMA4_MTP_N_PREDICT:
+            raise ValueError(
+                "Gemma4 MTP assistant config must use "
+                f"n_predict={GEMMA4_MTP_N_PREDICT}, got {n_predict!r}"
+            )
+        tie_word_embeddings = cls._optional_bool(
+            config,
+            "tie_word_embeddings",
+            context="assistant",
+            default=True,
+        )
+        use_ordered_embeddings = cls._optional_bool(
+            config,
+            "use_ordered_embeddings",
+            context="assistant",
+            default=False,
+        )
+        cls._validate_ordered_embedding_config(
+            config,
+            vocab_size=vocab_size,
+            use_ordered_embeddings=use_ordered_embeddings,
+        )
+
+        return cls(
+            model_type=str(model_type),
+            architectures=architectures,
+            vocab_size=vocab_size,
+            hidden_size=hidden_size,
+            backbone_hidden_size=backbone_hidden_size,
+            tie_word_embeddings=tie_word_embeddings,
+            num_hidden_layers=num_hidden_layers,
+            layer_types=layer_types,
+            use_ordered_embeddings=use_ordered_embeddings,
+        )
 
     def validate_compatible_with(self, target: Gemma4MTPTargetMetadata) -> None:
         if self.vocab_size != target.vocab_size:
@@ -736,138 +666,27 @@ class Gemma4MTPAssistantMetadata:
                 f"target_tail_layer_types={target_tail}"
             )
 
-
-class _Gemma4MTPAssistantConfigParser:
-    """Parse the Gemma4 MTP assistant checkpoint contract."""
-
-    @staticmethod
-    def _is_assistant_config(config: Any | None) -> bool:
-        if config is None:
-            return False
-        model_type = _config_value(config, "model_type")
-        if model_type in GEMMA4_MTP_DRAFT_MODEL_TYPES:
-            return True
-        return any(
-            arch in GEMMA4_MTP_DRAFT_ARCHITECTURES
-            for arch in _Gemma4MTPAssistantConfigParser._architectures(
-                config,
-                strict=False,
-            )
-        )
-
-    def parse(self, config: Any) -> Gemma4MTPAssistantMetadata:
-        model_type = _config_value(config, "model_type")
-        if model_type not in GEMMA4_MTP_DRAFT_MODEL_TYPES:
-            raise ValueError(
-                "Gemma4 MTP assistant requires a gemma4_assistant or gemma4_mtp "
-                f"config, got model_type={model_type!r}"
-            )
-
-        text_config = _text_config(config)
-        text_model_type = _config_value(text_config, "model_type")
-        if text_model_type != GEMMA4_MTP_TEXT_MODEL_TYPE:
-            raise ValueError(
-                "Gemma4 MTP assistant text_config.model_type must be "
-                f"{GEMMA4_MTP_TEXT_MODEL_TYPE!r}, got {text_model_type!r}"
-            )
-
-        vocab_size = self._required_positive_int(
-            text_config,
-            "vocab_size",
-            context="assistant",
-        )
-        top_level_vocab_size = self._optional_positive_int(
-            config,
-            "vocab_size",
-            context="assistant",
-        )
-        if top_level_vocab_size is not None and top_level_vocab_size != vocab_size:
-            raise ValueError(
-                "Gemma4 MTP assistant vocab_size metadata mismatch: "
-                f"top-level={top_level_vocab_size}, text_config={vocab_size}"
-            )
-
-        hidden_size = self._required_positive_int(
-            text_config,
-            "hidden_size",
-            context="assistant",
-        )
-        backbone_hidden_size = self._required_positive_int(
-            config,
-            "backbone_hidden_size",
-            context="assistant",
-        )
-        num_hidden_layers = self._required_positive_int(
-            text_config,
-            "num_hidden_layers",
-            context="assistant",
-        )
-        layer_types = self._required_layer_types(text_config, num_hidden_layers)
-        architectures = self._architectures(config, strict=True)
-        if not any(arch in GEMMA4_MTP_DRAFT_ARCHITECTURES for arch in architectures):
-            raise ValueError(
-                "Gemma4 MTP assistant requires a Gemma4 MTP architecture, got "
-                f"architectures={architectures!r}"
-            )
-
-        n_predict = self._optional_int(config, "n_predict", context="assistant")
-        if n_predict is not None and n_predict != GEMMA4_MTP_N_PREDICT:
-            raise ValueError(
-                "Gemma4 MTP assistant config must use "
-                f"n_predict={GEMMA4_MTP_N_PREDICT}, got {n_predict!r}"
-            )
-        tie_word_embeddings = self._optional_bool(
-            config,
-            "tie_word_embeddings",
-            context="assistant",
-            default=True,
-        )
-        use_ordered_embeddings = self._optional_bool(
-            config,
-            "use_ordered_embeddings",
-            context="assistant",
-            default=False,
-        )
-        self._validate_ordered_embedding_config(
-            config,
-            vocab_size=vocab_size,
-            use_ordered_embeddings=use_ordered_embeddings,
-        )
-
-        return Gemma4MTPAssistantMetadata(
-            model_type=str(model_type),
-            architectures=architectures,
-            vocab_size=vocab_size,
-            hidden_size=hidden_size,
-            backbone_hidden_size=backbone_hidden_size,
-            tie_word_embeddings=tie_word_embeddings,
-            num_hidden_layers=num_hidden_layers,
-            layer_types=layer_types,
-            use_ordered_embeddings=use_ordered_embeddings,
-        )
-
-    @staticmethod
+    @classmethod
     def _validate_ordered_embedding_config(
+        cls,
         config: Any,
         *,
         vocab_size: int,
         use_ordered_embeddings: bool,
     ) -> None:
-        num_centroids = _Gemma4MTPAssistantConfigParser._optional_positive_int(
+        if not use_ordered_embeddings:
+            return
+
+        num_centroids = cls._optional_int(
             config,
             "num_centroids",
             context="assistant",
         )
-        centroid_intermediate_top_k = (
-            _Gemma4MTPAssistantConfigParser._optional_positive_int(
-                config,
-                "centroid_intermediate_top_k",
-                context="assistant",
-            )
+        centroid_intermediate_top_k = cls._optional_int(
+            config,
+            "centroid_intermediate_top_k",
+            context="assistant",
         )
-        if not use_ordered_embeddings:
-            return
-
         num_centroids = (
             GEMMA4_MTP_DEFAULT_NUM_CENTROIDS if num_centroids is None else num_centroids
         )
@@ -876,6 +695,15 @@ class _Gemma4MTPAssistantConfigParser:
             if centroid_intermediate_top_k is None
             else centroid_intermediate_top_k
         )
+        if num_centroids <= 0:
+            raise ValueError(
+                f"assistant num_centroids must be positive, got {num_centroids}"
+            )
+        if centroid_intermediate_top_k <= 0:
+            raise ValueError(
+                "assistant centroid_intermediate_top_k must be positive, "
+                f"got {centroid_intermediate_top_k}"
+            )
         if vocab_size % num_centroids != 0:
             raise ValueError(
                 "Gemma4 MTP assistant vocab_size must be divisible by "
@@ -889,9 +717,11 @@ class _Gemma4MTPAssistantConfigParser:
                 f"{centroid_intermediate_top_k}, num_centroids={num_centroids}"
             )
 
-    @staticmethod
-    def _required_layer_types(config: Any, num_hidden_layers: int) -> tuple[str, ...]:
-        layer_types = _Gemma4MTPAssistantConfigParser._sequence_field(
+    @classmethod
+    def _required_layer_types(
+        cls, config: Any, num_hidden_layers: int
+    ) -> tuple[str, ...]:
+        layer_types = cls._sequence_field(
             config,
             "layer_types",
         )
@@ -906,57 +736,46 @@ class _Gemma4MTPAssistantConfigParser:
             raise ValueError(f"Unsupported Gemma4 MTP assistant layer types: {unknown}")
         return layer_types
 
-    @staticmethod
-    def _required_int(config: Any, key: str, *, context: str) -> int:
+    @classmethod
+    def _required_int(cls, config: Any, key: str, *, context: str) -> int:
         value = _config_value(config, key)
         if value is None:
             raise ValueError(f"Missing {context} {key}")
-        return _Gemma4MTPAssistantConfigParser._coerce_int(
+        return cls._coerce_int(
             value,
             key=key,
             context=context,
         )
 
-    @staticmethod
-    def _optional_int(config: Any, key: str, *, context: str) -> int | None:
+    @classmethod
+    def _optional_int(cls, config: Any, key: str, *, context: str) -> int | None:
         value = _config_value(config, key)
         if value is None:
             return None
-        return _Gemma4MTPAssistantConfigParser._coerce_int(
+        return cls._coerce_int(
             value,
             key=key,
             context=context,
         )
 
-    @staticmethod
-    def _optional_positive_int(config: Any, key: str, *, context: str) -> int | None:
-        value = _Gemma4MTPAssistantConfigParser._optional_int(
-            config,
-            key,
-            context=context,
-        )
-        if value is None:
-            return None
-        if value <= 0:
-            raise ValueError(f"{context} {key} must be positive, got {value}")
-        return value
-
-    @staticmethod
-    def _optional_bool(config: Any, key: str, *, context: str, default: bool) -> bool:
+    @classmethod
+    def _optional_bool(
+        cls, config: Any, key: str, *, context: str, default: bool
+    ) -> bool:
         value = _config_value(config, key, default)
         if not isinstance(value, bool):
             raise ValueError(f"{context} {key} must be a boolean, got {value!r}")
         return value
 
-    @staticmethod
-    def _coerce_int(value: Any, *, key: str, context: str) -> int:
+    @classmethod
+    def _coerce_int(cls, value: Any, *, key: str, context: str) -> int:
         if isinstance(value, bool) or not isinstance(value, Integral):
             raise ValueError(f"{context} {key} must be an integer, got {value!r}")
         return int(value)
 
-    @staticmethod
-    def _required_positive_int(config: Any, key: str, *, context: str) -> int:
-        value = _Gemma4MTPAssistantConfigParser._required_int(
+    @classmethod
+    def _required_positive_int(cls, config: Any, key: str, *, context: str) -> int:
+        value = cls._required_int(
             config,
             key,
             context=context,
@@ -965,8 +784,8 @@ class _Gemma4MTPAssistantConfigParser:
             raise ValueError(f"{context} {key} must be positive, got {value}")
         return value
 
-    @staticmethod
-    def _architectures(config: Any, *, strict: bool) -> tuple[str, ...]:
+    @classmethod
+    def _architectures(cls, config: Any, *, strict: bool) -> tuple[str, ...]:
         architectures = _config_value(config, "architectures", ()) or ()
         if isinstance(architectures, str):
             if strict:
@@ -987,8 +806,8 @@ class _Gemma4MTPAssistantConfigParser:
             names.append(arch)
         return tuple(names)
 
-    @staticmethod
-    def _sequence_field(config: Any, key: str) -> tuple[str, ...]:
+    @classmethod
+    def _sequence_field(cls, config: Any, key: str) -> tuple[str, ...]:
         value = _config_value(config, key, ()) or ()
         if isinstance(value, str):
             raise ValueError(f"{key} must be a non-string sequence")

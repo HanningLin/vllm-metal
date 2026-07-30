@@ -497,22 +497,7 @@ def test_cache_policy_installs_gemma4_mtp_kv_sharing() -> None:
         "full_attention",
     ]
     runner = make_stub_runner(
-        model_args={
-            "vocab_size": 262144,
-            "hidden_size": 1536,
-        },
-        model_config=SimpleNamespace(
-            hf_config=SimpleNamespace(
-                text_config=SimpleNamespace(
-                    model_type="gemma4_text",
-                    vocab_size=262144,
-                    hidden_size=1536,
-                    num_hidden_layers=3,
-                    num_kv_shared_layers=0,
-                    layer_types=layer_types,
-                )
-            )
-        ),
+        model_args=_target_args(layer_types),
         _gemma4_mtp_assistant=_AssistantRuntime(),
     )
 
