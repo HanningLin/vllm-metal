@@ -112,16 +112,14 @@ class MetalWorker(WorkerBase):
 
     def init_device(self) -> None:
         """Initialize the Metal device and distributed environment."""
-        # Set up MLX device
-        if self.metal_config.use_mlx:
-            device_type = (
-                mx.DeviceType.gpu
-                if self.metal_config.mlx_device == "gpu"
-                else mx.DeviceType.cpu
-            )
-            mx.set_default_device(mx.Device(device_type))
-            logger.info(f"MLX device set to: {mx.default_device()}")
-            set_wired_limit()
+        device_type = (
+            mx.DeviceType.gpu
+            if self.metal_config.mlx_device == "gpu"
+            else mx.DeviceType.cpu
+        )
+        mx.set_default_device(mx.Device(device_type))
+        logger.info(f"MLX device set to: {mx.default_device()}")
+        set_wired_limit()
 
         # Use MetalPlatform.get_torch_device() to properly support MPS when available.
         # This ensures consistency with the platform's device selection logic and

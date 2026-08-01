@@ -20,7 +20,6 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     VLLM_METAL_MEMORY_FRACTION: str = "auto"
-    VLLM_METAL_USE_MLX: bool = True
     VLLM_MLX_DEVICE: str = "gpu"
     VLLM_METAL_DEBUG: bool = False
     VLLM_METAL_USE_PAGED_ATTENTION: bool = True
@@ -40,8 +39,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_METAL_MEMORY_FRACTION": lambda: os.getenv(
         "VLLM_METAL_MEMORY_FRACTION", "auto"
     ),
-    # Whether to use MLX as the compute backend (default True).
-    "VLLM_METAL_USE_MLX": lambda: os.getenv("VLLM_METAL_USE_MLX", "1") == "1",
     # MLX device type: "gpu" (default) or "cpu".
     "VLLM_MLX_DEVICE": lambda: os.getenv("VLLM_MLX_DEVICE", "gpu"),
     # Enable verbose debug logging (default False).
