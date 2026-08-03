@@ -236,17 +236,25 @@ class TestApplyGrammarBitmaskPaged:
         bitmask = np.vstack(
             [
                 _make_single_token_bitmask(allowed_decode),
+                _make_single_token_bitmask(30),
                 _make_single_token_bitmask(allowed_prefill),
             ]
         )
-        grammar = _make_grammar_output(["d0", "p0"], bitmask)
+        grammar = _make_grammar_output(["d0", "absent", "p0"], bitmask)
+        apply_bitmask = so.xgr.apply_token_bitmask_inplace
 
-        result = _to_numpy(
-            _applier.apply_paged(
-                sched, grammar, decode_reqs, prefill_reqs, cu, 1, logits
+        with patch.object(
+            so.xgr,
+            "apply_token_bitmask_inplace",
+            wraps=apply_bitmask,
+        ) as apply_bitmask_spy:
+            result = _to_numpy(
+                _applier.apply_paged(
+                    sched, grammar, decode_reqs, prefill_reqs, cu, 1, logits
+                )
             )
-        )
 
+        assert apply_bitmask_spy.call_count == 1
         # Decode row 0 (d0)
         assert np.isfinite(result[0, 0, allowed_decode])
         assert result[0, 0, (allowed_decode + 1) % VOCAB_SIZE] == float("-inf")
