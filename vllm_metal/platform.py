@@ -511,27 +511,6 @@ class MetalPlatform(Platform):
                     f"{max_port}"
                 )
 
-            # A stage can prune non-owned weights before materialization only
-            # when its loader preserves MLX's lazy arrays. The generic mlx_lm
-            # path does; AWQ's checkpoint-wide repack and the custom GGUF load
-            # do not. Reject those exact owners before spawning one eager full-
-            # model load per stage. vLLM 0.26 normalizes AWQ to auto_awq while
-            # the Metal GGUF integration registers gguf directly.
-            eager_loader = None
-            if model_config is not None:
-                if model_config.quantization == "gguf":
-                    eager_loader = "GGUF"
-                elif model_config.quantization == "auto_awq":
-                    eager_loader = "AWQ"
-            if eager_loader is not None:
-                raise NotImplementedError(
-                    f"Pipeline parallelism does not support {eager_loader} "
-                    "checkpoints because the loader materializes the complete "
-                    "model on every stage before stage slicing. Use "
-                    "pipeline_parallel_size=1 or a native MLX safetensors "
-                    "checkpoint."
-                )
-
         # Tensor parallelism is not supported on Metal/MLX yet: a single Apple
         # GPU per node cannot shard a TP>1 model, and there is no cross-device
         # collective wired in (mx.distributed). Only TP=1 is validated. Reject
@@ -628,6 +607,26 @@ class MetalPlatform(Platform):
             # NB: the Ray job-level hook is registered only AFTER the remaining DP
             # rejections (multimodal, STT) further below, so an unsupported DP
             # config fails fast before any ray.init side effect.
+
+        # A stage can prune non-owned weights before materialization only when
+        # its loader preserves MLX's lazy arrays. The generic mlx_lm path does;
+        # AWQ's checkpoint-wide repack and the custom GGUF load do not. Keep
+        # this after the topology guards above so TP and DP+PP configurations
+        # retain their more fundamental, actionable errors. vLLM 0.26
+        # normalizes AWQ to auto_awq; the Metal GGUF integration registers gguf.
+        eager_loader = None
+        if parallel_config.pipeline_parallel_size > 1 and model_config is not None:
+            if model_config.quantization == "gguf":
+                eager_loader = "GGUF"
+            elif model_config.quantization == "auto_awq":
+                eager_loader = "AWQ"
+        if eager_loader is not None:
+            raise NotImplementedError(
+                f"Pipeline parallelism does not support {eager_loader} "
+                "checkpoints because the loader materializes the complete model "
+                "on every stage before stage slicing. Use "
+                "pipeline_parallel_size=1 or an MLX-LM safetensors checkpoint."
+            )
 
         scheduler_config = vllm_config.scheduler_config
 
