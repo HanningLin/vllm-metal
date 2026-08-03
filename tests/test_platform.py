@@ -34,6 +34,41 @@ class TestMetalPlatform:
     """Tests for MetalPlatform class."""
 
     @staticmethod
+    def _pp_vllm_config(*, quantization: str | None = None) -> SimpleNamespace:
+        """Return a complete, supported PP config with one loader override."""
+        return SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                worker_cls="auto",
+                distributed_executor_backend="auto",
+                pipeline_parallel_size=2,
+                tensor_parallel_size=1,
+                disable_custom_all_reduce=False,
+            ),
+            cache_config=SimpleNamespace(
+                kv_cache_dtype_skip_layers=[],
+                block_size=None,
+            ),
+            model_config=SimpleNamespace(
+                model="test-model",
+                disable_cascade_attn=False,
+                tokenizer=None,
+                max_model_len=32768,
+                multimodal_config=None,
+                hf_config=SimpleNamespace(model_type="qwen3"),
+                is_hybrid=False,
+                quantization=quantization,
+            ),
+            scheduler_config=SimpleNamespace(
+                async_scheduling=False,
+                enable_chunked_prefill=True,
+                max_num_batched_tokens=2048,
+                max_num_scheduled_tokens=None,
+            ),
+            speculative_config=None,
+            lora_config=None,
+        )
+
+    @staticmethod
     def _patch_stt_resolution(
         monkeypatch: pytest.MonkeyPatch,
         *,
@@ -109,47 +144,22 @@ class TestMetalPlatform:
         ):
             MetalPlatform.check_and_update_config(vllm_config)
 
-    def test_check_and_update_config_allows_pipeline_parallel(
-        self, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize(
+        "quantization",
+        [None, "fp8"],
+        ids=["mlx-lm", "mlx-lm-fp8"],
+    )
+    def test_check_and_update_config_allows_lazy_pipeline_loader(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        quantization: str | None,
     ) -> None:
-        """PP>1 with TP=1 is allowed and selects the multiproc executor."""
+        """PP>1 admits MLX loaders that remain lazy until stage slicing."""
         self._patch_stt_resolution(monkeypatch, is_stt=False)
         monkeypatch.setenv("VLLM_METAL_USE_PAGED_ATTENTION", "1")
         reset_config()
         try:
-            vllm_config = SimpleNamespace(
-                parallel_config=SimpleNamespace(
-                    worker_cls="auto",
-                    distributed_executor_backend="auto",
-                    pipeline_parallel_size=2,
-                    tensor_parallel_size=1,
-                    disable_custom_all_reduce=False,
-                ),
-                cache_config=SimpleNamespace(
-                    kv_cache_dtype_skip_layers=[],
-                    block_size=None,
-                ),
-                model_config=SimpleNamespace(
-                    model="test-model",
-                    disable_cascade_attn=False,
-                    tokenizer=None,
-                    max_model_len=32768,
-                    multimodal_config=None,
-                    hf_config=SimpleNamespace(model_type="qwen3"),
-                    is_hybrid=False,
-                ),
-                # PP requires synchronous scheduling: the first stage has no
-                # sampler and rebuilds tokens from the scheduler, so a valid PP
-                # config sets async_scheduling False (see the reject test below).
-                scheduler_config=SimpleNamespace(
-                    async_scheduling=False,
-                    enable_chunked_prefill=True,
-                    max_num_batched_tokens=2048,
-                    max_num_scheduled_tokens=None,
-                ),
-                speculative_config=None,
-                lora_config=None,
-            )
+            vllm_config = self._pp_vllm_config(quantization=quantization)
 
             # Does not raise: PP>1 with TP=1 and sync scheduling falls through.
             MetalPlatform.check_and_update_config(vllm_config)
@@ -160,6 +170,31 @@ class TestMetalPlatform:
                 vllm_config.parallel_config.worker_cls
                 == "vllm_metal.v1.worker.MetalWorker"
             )
+        finally:
+            reset_config()
+
+    @pytest.mark.parametrize(
+        ("quantization", "loader_name"),
+        [("auto_awq", "AWQ"), ("gguf", "GGUF")],
+    )
+    def test_check_and_update_config_rejects_eager_pipeline_loader(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        quantization: str,
+        loader_name: str,
+    ) -> None:
+        """PP rejects loaders that materialize every stage's complete model."""
+        self._patch_stt_resolution(monkeypatch, is_stt=False)
+        monkeypatch.setenv("VLLM_METAL_USE_PAGED_ATTENTION", "1")
+        reset_config()
+        try:
+            vllm_config = self._pp_vllm_config(quantization=quantization)
+
+            with pytest.raises(
+                NotImplementedError,
+                match=rf"{loader_name}.*pipeline_parallel_size=1",
+            ):
+                MetalPlatform.check_and_update_config(vllm_config)
         finally:
             reset_config()
 
