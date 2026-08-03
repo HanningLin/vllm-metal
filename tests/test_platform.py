@@ -137,7 +137,10 @@ class TestMetalPlatform:
                 tensor_parallel_size=2,
                 disable_custom_all_reduce=False,
             ),
-            model_config=None,
+            model_config=SimpleNamespace(
+                is_hybrid=False,
+                quantization="auto_awq",
+            ),
         )
         with pytest.raises(
             NotImplementedError, match="alone or combined with pipeline"
@@ -578,7 +581,10 @@ class TestMetalPlatform:
             NotImplementedError, match="combining data parallelism with"
         ):
             MetalPlatform.check_and_update_config(
-                self._dp_vllm_config(parallel={"pipeline_parallel_size": 2})
+                self._dp_vllm_config(
+                    parallel={"pipeline_parallel_size": 2},
+                    model={"quantization": "gguf"},
+                )
             )
 
     def test_check_and_update_config_rejects_dp_speculative_decoding(self) -> None:
