@@ -608,19 +608,6 @@ class MetalPlatform(Platform):
             # rejections (multimodal, STT) further below, so an unsupported DP
             # config fails fast before any ray.init side effect.
 
-        # AWQ and GGUF materialize the full checkpoint before stage slicing.
-        if (
-            parallel_config.pipeline_parallel_size > 1
-            and model_config is not None
-            and model_config.quantization in ("auto_awq", "gguf")
-        ):
-            raise NotImplementedError(
-                "Pipeline parallelism does not support AWQ or GGUF checkpoints "
-                "because their loaders materialize the complete model on every "
-                "stage before stage slicing. Use "
-                "pipeline_parallel_size=1 or an MLX-LM safetensors checkpoint."
-            )
-
         scheduler_config = vllm_config.scheduler_config
 
         # Pipeline parallelism relays each sampled token to the first stage via the
@@ -762,6 +749,21 @@ class MetalPlatform(Platform):
             if was_async_scheduling and not scheduler_config.async_scheduling:
                 logger.info("STT: disabled async_scheduling")
             logger.info("STT model detected")
+
+        # The text AWQ and GGUF loaders materialize the full checkpoint before
+        # stage slicing. Multimodal and STT models take different loader paths.
+        if (
+            parallel_config.pipeline_parallel_size > 1
+            and model_config is not None
+            and model_config.multimodal_config is None
+            and model_config.quantization in ("auto_awq", "gguf")
+        ):
+            raise NotImplementedError(
+                "Pipeline parallelism does not support AWQ or GGUF checkpoints "
+                "because their loaders materialize the complete model on every "
+                "stage before stage slicing. Use "
+                "pipeline_parallel_size=1 or an MLX-LM safetensors checkpoint."
+            )
 
         # Data parallelism passed every admission guard above (including the
         # multimodal and STT rejections). Only now — after all fail-fasts, before

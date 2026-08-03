@@ -290,7 +290,6 @@ class TestMetalPlatform:
                 multimodal_config=None,
                 hf_config=SimpleNamespace(model_type="whisper"),
                 is_hybrid=False,
-                quantization=None,
             ),
             scheduler_config=SimpleNamespace(
                 async_scheduling=False,

@@ -446,6 +446,11 @@ class TestModelLifecycle:
         text_tokenizer = object()
         vlm_model = _qwen35_vlm_model()
         vlm_tokenizer = object()
+        vlm_lazy: list[bool] = []
+
+        def _load_vlm(_model_name: str, *, lazy: bool) -> tuple[object, object]:
+            vlm_lazy.append(lazy)
+            return vlm_model, vlm_tokenizer
 
         class _StubAWQLoader:
             @classmethod
@@ -458,11 +463,7 @@ class TestModelLifecycle:
             "mlx_lm_load",
             lambda *_args, **_kwargs: (text_model, text_tokenizer),
         )
-        monkeypatch.setattr(
-            model_lifecycle,
-            "mlx_vlm_load",
-            lambda _model_name: (vlm_model, vlm_tokenizer),
-        )
+        monkeypatch.setattr(model_lifecycle, "mlx_vlm_load", _load_vlm)
 
         lifecycle, runner = _make_lifecycle(
             model_config=_runner_model_config(
@@ -488,11 +489,13 @@ class TestModelLifecycle:
                 is_multimodal_model=True,
             )
         )
+        runner.pp = PipelineGroup(SimpleNamespace(rank=lambda: 0, size=lambda: 2))
         lifecycle.load()
 
         assert runner.model is vlm_model
         assert runner.tokenizer is vlm_tokenizer
         assert runner._is_vlm is True
+        assert vlm_lazy == [True]
 
     @pytest.mark.slow
     def test_load_auto_mode_real_qwen_fp8_checkpoint(
