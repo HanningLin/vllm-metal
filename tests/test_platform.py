@@ -35,7 +35,7 @@ class TestMetalPlatform:
 
     @staticmethod
     def _pp_vllm_config(*, quantization: str | None = None) -> SimpleNamespace:
-        """Return a complete, supported PP config with one loader override."""
+        """Return an otherwise valid PP config with one loader override."""
         return SimpleNamespace(
             parallel_config=SimpleNamespace(
                 worker_cls="auto",
@@ -315,6 +315,7 @@ class TestMetalPlatform:
                 multimodal_config=None,
                 hf_config=SimpleNamespace(model_type="whisper"),
                 is_hybrid=False,
+                quantization=None,
             ),
             scheduler_config=SimpleNamespace(
                 async_scheduling=False,
@@ -417,6 +418,7 @@ class TestMetalPlatform:
             "max_model_len": 32768,
             "hf_config": SimpleNamespace(model_type="qwen3"),
             "is_hybrid": False,
+            "quantization": None,
         }
         model_fields.update(model or {})
         return SimpleNamespace(

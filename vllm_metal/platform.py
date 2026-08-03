@@ -511,6 +511,27 @@ class MetalPlatform(Platform):
                     f"{max_port}"
                 )
 
+            # A stage can prune non-owned weights before materialization only
+            # when its loader preserves MLX's lazy arrays. The generic mlx_lm
+            # path does; AWQ's checkpoint-wide repack and the custom GGUF load
+            # do not. Reject those exact owners before spawning one eager full-
+            # model load per stage. vLLM 0.26 normalizes AWQ to auto_awq while
+            # the Metal GGUF integration registers gguf directly.
+            eager_loader = None
+            if model_config is not None:
+                if model_config.quantization == "gguf":
+                    eager_loader = "GGUF"
+                elif model_config.quantization == "auto_awq":
+                    eager_loader = "AWQ"
+            if eager_loader is not None:
+                raise NotImplementedError(
+                    f"Pipeline parallelism does not support {eager_loader} "
+                    "checkpoints because the loader materializes the complete "
+                    "model on every stage before stage slicing. Use "
+                    "pipeline_parallel_size=1 or a native MLX safetensors "
+                    "checkpoint."
+                )
+
         # Tensor parallelism is not supported on Metal/MLX yet: a single Apple
         # GPU per node cannot shard a TP>1 model, and there is no cross-device
         # collective wired in (mx.distributed). Only TP=1 is validated. Reject
