@@ -323,7 +323,7 @@ class TestV1SamplingBatch:
         prefill_reqs = [
             PrefillRequest("p0", [10, 11], greedy_params, [[0]], None, 2, 0, None),
             PrefillRequest(
-                "p1", [22], random_params, [[1]], generator, 3, 2, [20, 21, 22]
+                "p1", [21, 22], random_params, [[1]], generator, 3, 1, [20, 21, 22]
             ),
         ]
         sampler_calls: list[tuple[mx.array, SamplingBatch]] = []
@@ -346,7 +346,6 @@ class TestV1SamplingBatch:
             sampler=Sampler(),
             device=torch.device("cpu"),
             vocab_size=4,
-            logitsprocs=LogitsProcessors(),
         )
 
         assert len(sampler_calls) == 1
