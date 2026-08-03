@@ -36,7 +36,6 @@ class MetalConfig:
 
     memory_fraction: float  # -1.0 selects the active backend's auto policy
     mlx_device: Literal["gpu", "cpu"]
-    debug: bool
     use_paged_attention: bool = True
     multimodal_mode: MultimodalMode = "auto"
     turboquant: bool = False  # Enable TurboQuant KV cache compression
@@ -114,7 +113,6 @@ class MetalConfig:
         return cls(
             memory_fraction=memory_fraction,
             mlx_device=envs.VLLM_MLX_DEVICE,  # type: ignore[arg-type]
-            debug=envs.VLLM_METAL_DEBUG,
             use_paged_attention=envs.VLLM_METAL_USE_PAGED_ATTENTION,
             multimodal_mode=envs.VLLM_METAL_MULTIMODAL_MODE,  # type: ignore[arg-type]
         )

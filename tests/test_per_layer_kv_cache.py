@@ -291,7 +291,6 @@ class TestCachePolicyPerLayerBytes:
             lambda: MetalConfig(
                 memory_fraction=AUTO_MEMORY_FRACTION,
                 mlx_device="gpu",
-                debug=False,
                 turboquant=True,
             ),
         )
@@ -420,7 +419,6 @@ class TestMHAKVCacheLayout:
             lambda: MetalConfig(
                 memory_fraction=AUTO_MEMORY_FRACTION,
                 mlx_device="gpu",
-                debug=False,
                 turboquant=False,
             ),
         )
@@ -465,7 +463,6 @@ class TestMHAKVCacheLayout:
             lambda: MetalConfig(
                 memory_fraction=AUTO_MEMORY_FRACTION,
                 mlx_device="gpu",
-                debug=False,
                 turboquant=False,
             ),
         )
@@ -504,7 +501,6 @@ class TestMHAKVCacheLayout:
         metal_config = MetalConfig(
             memory_fraction=1.0,
             mlx_device="gpu",
-            debug=False,
             turboquant=False,
         )
         monkeypatch.setattr(
@@ -568,7 +564,6 @@ class TestMHAKVCacheLayout:
         metal_config = MetalConfig(
             memory_fraction=1.0,
             mlx_device="gpu",
-            debug=False,
             turboquant=False,
         )
         monkeypatch.setattr(
@@ -611,7 +606,6 @@ class TestMHAKVCacheLayout:
         metal_config = MetalConfig(
             memory_fraction=1.0,
             mlx_device="gpu",
-            debug=False,
             turboquant=False,
         )
         monkeypatch.setattr(
