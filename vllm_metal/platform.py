@@ -608,23 +608,16 @@ class MetalPlatform(Platform):
             # rejections (multimodal, STT) further below, so an unsupported DP
             # config fails fast before any ray.init side effect.
 
-        # A stage can prune non-owned weights before materialization only when
-        # its loader preserves MLX's lazy arrays. The generic mlx_lm path does;
-        # AWQ's checkpoint-wide repack and the custom GGUF load do not. Keep
-        # this after the topology guards above so TP and DP+PP configurations
-        # retain their more fundamental, actionable errors. vLLM 0.26
-        # normalizes AWQ to auto_awq; the Metal GGUF integration registers gguf.
-        eager_loader = None
-        if parallel_config.pipeline_parallel_size > 1 and model_config is not None:
-            if model_config.quantization == "gguf":
-                eager_loader = "GGUF"
-            elif model_config.quantization == "auto_awq":
-                eager_loader = "AWQ"
-        if eager_loader is not None:
+        # AWQ and GGUF materialize the full checkpoint before stage slicing.
+        if (
+            parallel_config.pipeline_parallel_size > 1
+            and model_config is not None
+            and model_config.quantization in ("auto_awq", "gguf")
+        ):
             raise NotImplementedError(
-                f"Pipeline parallelism does not support {eager_loader} "
-                "checkpoints because the loader materializes the complete model "
-                "on every stage before stage slicing. Use "
+                "Pipeline parallelism does not support AWQ or GGUF checkpoints "
+                "because their loaders materialize the complete model on every "
+                "stage before stage slicing. Use "
                 "pipeline_parallel_size=1 or an MLX-LM safetensors checkpoint."
             )
 
