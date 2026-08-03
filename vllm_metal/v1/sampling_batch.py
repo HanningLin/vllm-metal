@@ -6,7 +6,6 @@ Pure functions: logits in, token IDs out.  No model runner state accessed.
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Protocol
 
 import mlx.core as mx
 import numpy as np
@@ -22,14 +21,6 @@ from vllm_metal.pytorch_backend.tensor_bridge import mlx_to_torch
 
 GREEDY_TEMPERATURE_EPS = 1e-5
 _EMPTY_LOGITSPROCS = LogitsProcessors()
-
-
-class _PrefillRequestLike(Protocol):
-    token_ids: list[int]
-    sampling_params: SamplingParams
-    generator: torch.Generator | None
-    prompt_len: int | None
-    full_prompt_token_ids: list[int] | None
 
 
 @dataclass(frozen=True)
@@ -420,7 +411,7 @@ def sample_decode_tokens(
 
 def sample_prefill_tokens(
     logits: mx.array,
-    prefill_reqs: Sequence[_PrefillRequestLike],
+    prefill_reqs: list,
     cu_seqlens: list[int],
     num_decode: int,
     sampler: Sampler,
@@ -444,42 +435,34 @@ def sample_prefill_tokens(
     if not prefill_reqs:
         return _SamplingResult([])
 
+    prompt_token_id_lists: list[list[int]] = []
+    output_token_id_lists: list[list[int]] = []
+    for pr in prefill_reqs:
+        prompt_for_meta = pr.full_prompt_token_ids
+        if prompt_for_meta is None:
+            prompt_for_meta = pr.token_ids
+        prompt_len = pr.prompt_len
+        if prompt_len is None:
+            prompt_len = len(prompt_for_meta)
+        prompt_token_id_lists.append(prompt_for_meta[:prompt_len])
+        output_token_id_lists.append(prompt_for_meta[prompt_len:])
+
     last_logits = mx.stack(
         [
             logits[0, cu_seqlens[num_decode + j + 1] - 1, :]
             for j in range(len(prefill_reqs))
         ]
     )
-    sampling_params_list: list[SamplingParams] = []
-    prompt_token_id_lists: list[list[int]] = []
-    output_token_id_lists: list[list[int]] = []
-    generators: dict[int, torch.Generator] = {}
-
-    for j, pr in enumerate(prefill_reqs):
-        if pr.full_prompt_token_ids is not None:
-            prompt_len = len(pr.full_prompt_token_ids)
-        elif pr.prompt_len is not None:
-            prompt_len = pr.prompt_len
-        else:
-            prompt_len = len(pr.token_ids)
-
-        prompt_for_meta = (
-            pr.full_prompt_token_ids
-            if pr.full_prompt_token_ids is not None
-            else pr.token_ids
-        )
-        sampling_params_list.append(pr.sampling_params)
-        prompt_token_id_lists.append(prompt_for_meta[:prompt_len])
-        output_token_id_lists.append(prompt_for_meta[prompt_len:])
-        if pr.generator is not None:
-            generators[j] = pr.generator
-
     batch = SamplingBatch(
-        sampling_params_list,
+        [pr.sampling_params for pr in prefill_reqs],
         prompt_token_id_lists,
         output_token_id_lists,
         vocab_size=vocab_size,
         device=device,
-        generators=generators,
+        generators={
+            j: pr.generator
+            for j, pr in enumerate(prefill_reqs)
+            if pr.generator is not None
+        },
     )
     return sample_from_logits(last_logits, batch, sampler, device)

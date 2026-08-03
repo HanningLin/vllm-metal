@@ -17,8 +17,10 @@ from vllm.v1.sample.sampler import Sampler
 
 from tests.stub_runner import make_stub_runner
 from vllm_metal.pytorch_backend.tensor_bridge import mlx_to_torch
+from vllm_metal.v1 import sampling_batch
 from vllm_metal.v1.model_runner import (
     MetalModelRunner,
+    PrefillRequest,
     RequestState,
     _create_request_generator,
     _ExecutionBatch,
@@ -312,6 +314,66 @@ class TestV1SamplingBatch:
             vocab_size=VOCAB_SIZE,
             device=torch.device("cpu"),
         )
+
+    def test_prefill_requests_share_one_sampler_batch(self, monkeypatch) -> None:
+        logits = mx.arange(24, dtype=mx.float16).reshape(1, 6, 4)
+        greedy_params = SamplingParams(temperature=0.0, logprobs=1)
+        random_params = SamplingParams(temperature=0.7, top_k=3, logprobs=1)
+        generator = torch.Generator().manual_seed(42)
+        prefill_reqs = [
+            PrefillRequest("p0", [10, 11], greedy_params, [[0]], None, 2, 0, None),
+            PrefillRequest(
+                "p1", [22], random_params, [[1]], generator, 3, 2, [20, 21, 22]
+            ),
+        ]
+        sampler_calls: list[tuple[mx.array, SamplingBatch]] = []
+
+        def capture_batch(
+            logits_2d: mx.array,
+            batch: SamplingBatch,
+            *_args: object,
+        ) -> sampling_batch._SamplingResult:
+            sampler_calls.append((logits_2d, batch))
+            return sampling_batch._SamplingResult([7] * len(batch.sampling_params_list))
+
+        monkeypatch.setattr(sampling_batch, "sample_from_logits", capture_batch)
+
+        result = sampling_batch.sample_prefill_tokens(
+            logits,
+            prefill_reqs,
+            cu_seqlens=[0, 2, 4, 6],
+            num_decode=1,
+            sampler=Sampler(),
+            device=torch.device("cpu"),
+            vocab_size=4,
+            logitsprocs=LogitsProcessors(),
+        )
+
+        assert len(sampler_calls) == 1
+        sampled_logits, batch = sampler_calls[0]
+        assert sampled_logits.tolist() == [
+            [12.0, 13.0, 14.0, 15.0],
+            [20.0, 21.0, 22.0, 23.0],
+        ]
+        assert sampled_logits.dtype == mx.float16
+        assert batch.sampling_params_list == [greedy_params, random_params]
+        assert batch.prompt_token_id_lists == [[10, 11], [20, 21, 22]]
+        assert batch.output_token_id_lists == [[], []]
+        assert batch.generators == {1: generator}
+        assert result.token_ids == [7, 7]
+
+    def test_empty_prefill_batch_skips_sampling(self) -> None:
+        result = sampling_batch.sample_prefill_tokens(
+            mx.zeros((1, 0, 4)),
+            [],
+            cu_seqlens=[0],
+            num_decode=0,
+            sampler=Sampler(),
+            device=torch.device("cpu"),
+            vocab_size=4,
+        )
+
+        assert result == sampling_batch._SamplingResult([])
 
     def test_can_use_native_greedy_requires_greedy_without_filters(self) -> None:
         assert self._batch([SamplingParams(temperature=0.0)]).can_use_native_greedy()
