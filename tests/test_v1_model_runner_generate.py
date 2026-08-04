@@ -119,10 +119,26 @@ class TestV1MetalModelRunnerGenerate:
     def _make_runner(self) -> mr.MetalModelRunner:
         return make_stub_runner(tokenizer=object())
 
-    def test_init_rejects_configured_custom_logits_processors(self) -> None:
+    @pytest.mark.parametrize(
+        ("configured_processors", "installed_processors"),
+        [
+            ([object], ()),
+            (None, (object(),)),
+        ],
+        ids=["configured", "installed-plugin"],
+    )
+    def test_init_rejects_custom_logits_processors(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        configured_processors: list[type] | None,
+        installed_processors: tuple[object, ...],
+    ) -> None:
+        monkeypatch.setattr(
+            mr, "entry_points", lambda **_: installed_processors, raising=False
+        )
         vllm_config = SimpleNamespace(
             model_config=SimpleNamespace(
-                logits_processors=[object],
+                logits_processors=configured_processors,
                 runner_type="generate",
             ),
             cache_config=SimpleNamespace(),

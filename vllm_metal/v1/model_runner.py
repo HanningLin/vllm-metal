@@ -13,6 +13,7 @@ Key contracts:
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from importlib.metadata import entry_points
 from typing import Any, Literal, NamedTuple, TypeAlias
 
 import mlx.core as mx
@@ -39,6 +40,7 @@ from vllm.v1.outputs import (
     LogprobsLists,
     ModelRunnerOutput,
 )
+from vllm.v1.sample.logits_processor import LOGITSPROCS_GROUP
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
 
@@ -279,7 +281,9 @@ class MetalModelRunner:
             vllm_config: vLLM configuration
             device: PyTorch device (CPU for Metal interop)
         """
-        if vllm_config.model_config.logits_processors:
+        if vllm_config.model_config.logits_processors or entry_points(
+            group=LOGITSPROCS_GROUP
+        ):
             raise NotImplementedError(
                 "vllm-metal does not support custom logits processors."
             )
