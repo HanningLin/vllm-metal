@@ -8,6 +8,7 @@ from unittest.mock import Mock
 import mlx.core as mx
 import numpy as np
 import pytest
+import torch
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
@@ -117,6 +118,20 @@ class TestDrafterReleaseOnLifecycle:
 class TestV1MetalModelRunnerGenerate:
     def _make_runner(self) -> mr.MetalModelRunner:
         return make_stub_runner(tokenizer=object())
+
+    def test_init_rejects_configured_custom_logits_processors(self) -> None:
+        vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(
+                logits_processors=[object],
+                runner_type="generate",
+            ),
+            cache_config=SimpleNamespace(),
+            scheduler_config=SimpleNamespace(async_scheduling=False),
+            speculative_config=None,
+        )
+
+        with pytest.raises(NotImplementedError, match="custom logits processors"):
+            mr.MetalModelRunner(vllm_config, torch.device("cpu"))
 
     def test_warm_up_propagates_dummy_forward_failure(self) -> None:
         runner = self._make_runner()
@@ -1320,17 +1335,49 @@ class TestV1MetalModelRunnerExecuteModel:
             has_structured_output_requests=False,
         )
 
-    def _make_new_request(self, req_id: str = "new") -> NewRequestData:
+    def _make_new_request(
+        self,
+        req_id: str = "new",
+        sampling_params: SamplingParams | None = None,
+    ) -> NewRequestData:
         return NewRequestData(
             req_id=req_id,
             prompt_token_ids=[1],
             mm_features=[],
-            sampling_params=SamplingParams(),
+            sampling_params=sampling_params or SamplingParams(),
             pooling_params=None,
             block_ids=([0],),
             num_computed_tokens=0,
             lora_request=None,
         )
+
+    @pytest.mark.parametrize(
+        ("sampling_params", "control"),
+        [
+            (SamplingParams(min_p=0.1), "min_p"),
+            (SamplingParams(logit_bias={1: 2.0}), "logit_bias"),
+            (SamplingParams(min_tokens=2), "min_tokens"),
+        ],
+        ids=["min-p", "logit-bias", "min-tokens"],
+    )
+    def test_new_request_rejects_unsupported_logits_processor_controls(
+        self,
+        sampling_params: SamplingParams,
+        control: str,
+    ) -> None:
+        runner = self._make_runner()
+        runner._prefill_single = Mock(return_value=(1, [], None))
+        new_req = self._make_new_request(sampling_params=sampling_params)
+
+        with pytest.raises(NotImplementedError, match=control):
+            runner._handle_new_requests(
+                mr._ExecutionBatch(),
+                [new_req],
+                self._make_scheduler_output(scheduled_new_reqs=[new_req]),
+            )
+
+        runner._prefill_single.assert_not_called()
+        assert "new" not in runner._request_states
 
     def test_returns_empty_output_directly_for_empty_batch(self) -> None:
         runner = self._make_runner()
