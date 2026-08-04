@@ -23,8 +23,6 @@ from vllm.v1.outputs import DraftTokenIds
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from vllm.v1.sample.logits_processor import LogitsProcessors
-
     from vllm_metal.v1.model_runner import (
         MetalModelRunner,
         PrefillRequest,
@@ -53,7 +51,6 @@ class ProposeContext:
     cu_seqlens: Sequence[int]
     num_decode_segments: int
     num_speculative_tokens: int
-    logitsprocs: LogitsProcessors | None
     # Request ids the scheduler finished this step. vLLM can hand a finished
     # id straight back out to a new request in the same step, so a proposer
     # that keeps its own per-request state must clear against this, not
@@ -140,7 +137,6 @@ class Gemma4MTPProposer:
             request_states=ctx.request_states,
             cu_seqlens=ctx.cu_seqlens,
             num_decode_segments=ctx.num_decode_segments,
-            logitsprocs=ctx.logitsprocs,
         )
         if not seeds:
             return None

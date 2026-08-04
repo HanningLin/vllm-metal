@@ -266,7 +266,6 @@ class DraftModelProposer:
             ctx.prefill_reqs,
             ctx.prefill_result_modes,
             ctx.request_states,
-            logitsprocs=ctx.logitsprocs,
         )
         plans: list[_DraftPlan] = []
         for req_id, state in eligible:

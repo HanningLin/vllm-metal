@@ -9,8 +9,6 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 import mlx.core as mx
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.sample.logits_processor import LogitsProcessors
-from vllm.v1.sample.logits_processor.builtin import MinTokensLogitsProcessor
 
 from vllm_metal.v1.gemma4_mtp import Gemma4MTPDraftSeed
 from vllm_metal.v1.sampling_batch import GREEDY_TEMPERATURE_EPS
@@ -28,7 +26,6 @@ class _PagedDecodeStateLike(Protocol):
 
 class _SpecDecodeRequestStateLike(Protocol):
     sampling_params: Any
-    generated_tokens: int
 
 
 class _SpecDecodePrefillLike(Protocol):
@@ -121,7 +118,6 @@ class SpeculativeDecodeController:
         *,
         paged_attention_enabled: bool,
         is_hybrid: bool,
-        logitsprocs: LogitsProcessors | None,
         use_async_scheduling: bool = False,
         speculative_config: SpeculativeConfig | None = None,
     ) -> None:
@@ -196,7 +192,7 @@ class SpeculativeDecodeController:
                 )
             draft_reqs.append((req_id, request_by_id[req_id]))
 
-        self._validate_greedy_sampling(draft_reqs, logitsprocs=logitsprocs)
+        self._validate_greedy_sampling(draft_reqs)
 
     def build_decode_segments(
         self,
@@ -249,8 +245,6 @@ class SpeculativeDecodeController:
         logits: mx.array,
         decode_reqs: Sequence[tuple[str, _SpecDecodeRequestStateLike]],
         decode_segments: Sequence[PagedDecodeSegment],
-        *,
-        logitsprocs: LogitsProcessors | None,
     ) -> list[list[int]]:
         """Verify scheduled draft tokens with greedy target logits."""
         if len(decode_reqs) != len(decode_segments):
@@ -266,7 +260,7 @@ class SpeculativeDecodeController:
                     f"metadata: {req_id!r} != {segment.req_id!r}"
                 )
 
-        self._validate_greedy_sampling(decode_reqs, logitsprocs=logitsprocs)
+        self._validate_greedy_sampling(decode_reqs)
 
         num_decode_rows = max(
             segment.start_row + segment.num_query_tokens for segment in decode_segments
@@ -311,7 +305,6 @@ class SpeculativeDecodeController:
         request_states: Mapping[str, _SpecDecodeRequestStateLike],
         cu_seqlens: Sequence[int],
         num_decode_segments: int,
-        logitsprocs: LogitsProcessors | None,
     ) -> tuple[Gemma4MTPDraftSeed, ...]:
         """Build target-row seeds for one-token Gemma4 MTP drafts."""
         seeds: list[Gemma4MTPDraftSeed] = []
@@ -321,11 +314,7 @@ class SpeculativeDecodeController:
             decode_token_ids,
             strict=True,
         ):
-            if not sampled_ids or not self.can_draft_greedy(
-                req_id,
-                state,
-                logitsprocs=logitsprocs,
-            ):
+            if not sampled_ids or not self.can_draft_greedy(req_id, state):
                 continue
             accepted_offset = len(sampled_ids) - 1
             seeds.append(
@@ -344,11 +333,7 @@ class SpeculativeDecodeController:
             if result_mode == "intermediate":
                 continue
             state = request_states.get(prefill.req_id)
-            if state is None or not self.can_draft_greedy(
-                prefill.req_id,
-                state,
-                logitsprocs=logitsprocs,
-            ):
+            if state is None or not self.can_draft_greedy(prefill.req_id, state):
                 continue
             prefill_end = cu_seqlens[num_decode_segments + i + 1]
             seeds.append(
@@ -367,15 +352,10 @@ class SpeculativeDecodeController:
         self,
         req_id: str,
         request_state: _SpecDecodeRequestStateLike,
-        *,
-        logitsprocs: LogitsProcessors | None,
     ) -> bool:
         """Whether a request may be drafted under greedy-only spec decode."""
         try:
-            self._validate_greedy_sampling(
-                [(req_id, request_state)],
-                logitsprocs=logitsprocs,
-            )
+            self._validate_greedy_sampling([(req_id, request_state)])
         except NotImplementedError:
             return False
         return True
@@ -387,8 +367,6 @@ class SpeculativeDecodeController:
         prefill_reqs: Sequence[_SpecDecodePrefillLike],
         prefill_result_modes: Sequence[str],
         request_states: Mapping[str, _SpecDecodeRequestStateLike],
-        *,
-        logitsprocs: LogitsProcessors | None,
     ) -> Sequence[tuple[str, RequestState]]:
         """Filter ``ctx`` to requests eligible for drafting this step.
 
@@ -411,7 +389,7 @@ class SpeculativeDecodeController:
         ):
             if not sampled_ids:
                 continue
-            if not self.can_draft_greedy(req_id, state, logitsprocs=logitsprocs):
+            if not self.can_draft_greedy(req_id, state):
                 continue
             eligible.append((req_id, state))  # type: ignore[arg-type]
             seen.add(req_id)
@@ -422,9 +400,7 @@ class SpeculativeDecodeController:
             if result_mode == "intermediate" or prefill.req_id in seen:
                 continue
             state = request_states.get(prefill.req_id)
-            if state is None or not self.can_draft_greedy(
-                prefill.req_id, state, logitsprocs=logitsprocs
-            ):
+            if state is None or not self.can_draft_greedy(prefill.req_id, state):
                 continue
             eligible.append((prefill.req_id, state))  # type: ignore[arg-type]
 
@@ -433,8 +409,6 @@ class SpeculativeDecodeController:
     def _validate_greedy_sampling(
         self,
         decode_reqs: Sequence[tuple[str, _SpecDecodeRequestStateLike]],
-        *,
-        logitsprocs: LogitsProcessors | None,
     ) -> None:
         for _, request_state in decode_reqs:
             sampling_params = request_state.sampling_params
@@ -455,31 +429,6 @@ class SpeculativeDecodeController:
                     "supports greedy sampling only (temperature=0, no "
                     "penalties, constraints, or logprobs)."
                 )
-
-            if (
-                sampling_params.min_tokens
-                and request_state.generated_tokens < sampling_params.min_tokens
-                and sampling_params.all_stop_token_ids
-            ):
-                raise NotImplementedError(
-                    "Speculative decode verification on Metal does not support "
-                    "active min_tokens constraints yet."
-                )
-
-        if logitsprocs is None:
-            return
-
-        unsupported_processors = [
-            processor
-            for processor in logitsprocs.non_argmax_invariant
-            if not isinstance(processor, MinTokensLogitsProcessor)
-        ]
-        if unsupported_processors:
-            raise NotImplementedError(
-                "Speculative decode verification on Metal currently supports "
-                "greedy sampling only; non-argmax logits processors are not "
-                "supported."
-            )
 
 
 __all__ = [

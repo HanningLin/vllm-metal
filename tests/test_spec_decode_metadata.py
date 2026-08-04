@@ -8,10 +8,8 @@ from types import SimpleNamespace
 
 import mlx.core as mx
 import pytest
-import torch
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
-from vllm.v1.sample.logits_processor import LogitsProcessors, build_logitsprocs
 
 from vllm_metal.v1.gemma4_mtp import Gemma4MTPDraftSeed
 from vllm_metal.v1.spec_decode import (
@@ -26,18 +24,9 @@ def _state(token_ids: list[int], block_ids: list[int]) -> SimpleNamespace:
 
 def _request_state(
     temperature: float = 0.0,
-    *,
-    generated_tokens: int = 1,
-    min_tokens: int = 0,
-    stop_token_ids: list[int] | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
-        sampling_params=SamplingParams(
-            temperature=temperature,
-            min_tokens=min_tokens,
-            stop_token_ids=stop_token_ids,
-        ),
-        generated_tokens=generated_tokens,
+        sampling_params=SamplingParams(temperature=temperature),
     )
 
 
@@ -62,19 +51,6 @@ def _scheduler_output(
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
         num_invalid_spec_tokens=num_invalid_spec_tokens,
-    )
-
-
-def _spec_logitsprocs():
-    config = SimpleNamespace(
-        speculative_config=object(),
-        scheduler_config=SimpleNamespace(max_num_seqs=4),
-    )
-    return build_logitsprocs(
-        config,
-        torch.device("cpu"),
-        is_pin_memory=False,
-        is_pooling_model=False,
     )
 
 
@@ -210,7 +186,6 @@ class TestSpecDecodePolicy:
             (),
             paged_attention_enabled=False,
             is_hybrid=True,
-            logitsprocs=None,
         )
 
     def test_gemma4_mtp_rejects_async_scheduling(self) -> None:
@@ -220,7 +195,6 @@ class TestSpecDecodePolicy:
                 (),
                 paged_attention_enabled=True,
                 is_hybrid=False,
-                logitsprocs=None,
                 use_async_scheduling=True,
                 speculative_config=_gemma4_mtp_speculative_config(),
             )
@@ -232,7 +206,6 @@ class TestSpecDecodePolicy:
                 [("r0", _request_state())],
                 paged_attention_enabled=False,
                 is_hybrid=False,
-                logitsprocs=None,
             )
 
     def test_hybrid_scheduled_tokens_are_rejected(self) -> None:
@@ -242,7 +215,6 @@ class TestSpecDecodePolicy:
                 [("r0", _request_state())],
                 paged_attention_enabled=True,
                 is_hybrid=True,
-                logitsprocs=None,
             )
 
     def test_rejects_invalid_draft_token_sentinel(self) -> None:
@@ -252,7 +224,6 @@ class TestSpecDecodePolicy:
                 [("r0", _request_state())],
                 paged_attention_enabled=True,
                 is_hybrid=False,
-                logitsprocs=None,
             )
 
     def test_rejects_scheduler_invalid_spec_tokens(self) -> None:
@@ -265,7 +236,6 @@ class TestSpecDecodePolicy:
                 [("r0", _request_state())],
                 paged_attention_enabled=True,
                 is_hybrid=False,
-                logitsprocs=None,
             )
 
     def test_rejects_handoff_for_request_outside_decode_set(self) -> None:
@@ -275,7 +245,6 @@ class TestSpecDecodePolicy:
                 [("r0", _request_state())],
                 paged_attention_enabled=True,
                 is_hybrid=False,
-                logitsprocs=None,
             )
 
     def test_rejects_empty_handoff_for_request_outside_decode_set(self) -> None:
@@ -285,7 +254,6 @@ class TestSpecDecodePolicy:
                 [("r0", _request_state())],
                 paged_attention_enabled=True,
                 is_hybrid=False,
-                logitsprocs=None,
             )
 
     def test_rejects_mismatched_scheduler_token_accounting(self) -> None:
@@ -298,44 +266,6 @@ class TestSpecDecodePolicy:
                 [("r0", _request_state())],
                 paged_attention_enabled=True,
                 is_hybrid=False,
-                logitsprocs=None,
-            )
-
-    def test_allows_inactive_min_tokens_processor_from_speculative_config(self) -> None:
-        SpeculativeDecodeController().validate_supported(
-            _scheduler_output(scheduled_spec_decode_tokens={"r0": [1]}),
-            [
-                (
-                    "r0",
-                    _request_state(
-                        generated_tokens=2,
-                        min_tokens=1,
-                        stop_token_ids=[2],
-                    ),
-                )
-            ],
-            paged_attention_enabled=True,
-            is_hybrid=False,
-            logitsprocs=_spec_logitsprocs(),
-        )
-
-    def test_rejects_active_min_tokens_constraint(self) -> None:
-        with pytest.raises(NotImplementedError, match="active min_tokens"):
-            SpeculativeDecodeController().validate_supported(
-                _scheduler_output(scheduled_spec_decode_tokens={"r0": [1]}),
-                [
-                    (
-                        "r0",
-                        _request_state(
-                            generated_tokens=0,
-                            min_tokens=3,
-                            stop_token_ids=[2],
-                        ),
-                    )
-                ],
-                paged_attention_enabled=True,
-                is_hybrid=False,
-                logitsprocs=_spec_logitsprocs(),
             )
 
 
@@ -373,7 +303,6 @@ class TestGemma4MTPDraftSeeds:
             request_states={},
             cu_seqlens=[0, 2, 3],
             num_decode_segments=2,
-            logitsprocs=None,
         )
 
         assert seeds == (
@@ -413,7 +342,6 @@ class TestGemma4MTPDraftSeeds:
             },
             cu_seqlens=[0, 3, 5],
             num_decode_segments=0,
-            logitsprocs=None,
         )
 
         assert seeds == (
@@ -443,7 +371,6 @@ class TestVerifyGreedySpecDecode:
             _logits([7, 8, 9]),
             [("r0", _request_state())],
             (segment,),
-            logitsprocs=None,
         )
 
         assert output == [[7, 8, 9]]
@@ -463,7 +390,6 @@ class TestVerifyGreedySpecDecode:
             _logits([7, 5, 9]),
             [("r0", _request_state())],
             (segment,),
-            logitsprocs=None,
         )
 
         assert output == [[7, 5]]
@@ -484,30 +410,6 @@ class TestVerifyGreedySpecDecode:
                 _logits([7, 9]),
                 [("r0", _request_state(temperature=0.7))],
                 (segment,),
-                logitsprocs=None,
-            )
-
-    def test_rejects_logits_processors_that_can_change_argmax(self) -> None:
-        class _NonArgmaxProcessor:
-            def is_argmax_invariant(self) -> bool:
-                return False
-
-        with pytest.raises(NotImplementedError, match="logits processors"):
-            SpeculativeDecodeController().verify_greedy(
-                _logits([7, 9]),
-                [("r0", _request_state())],
-                (
-                    PagedDecodeSegment(
-                        req_id="r0",
-                        input_token_ids=(6, 7),
-                        start_row=0,
-                        num_query_tokens=2,
-                        draft_token_ids=(7,),
-                        cache_start_pos=1,
-                        block_ids=((0,),),
-                    ),
-                ),
-                logitsprocs=LogitsProcessors([_NonArgmaxProcessor()]),
             )
 
 
@@ -564,7 +466,6 @@ class TestSchedulerPaddedDrafts:
             [],
             paged_attention_enabled=True,
             is_hybrid=False,
-            logitsprocs=None,
         )
 
     def test_padded_drafts_reach_build_decode_segments_as_zero_drafts(self) -> None:

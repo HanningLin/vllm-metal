@@ -14,16 +14,13 @@ from vllm.sampling_params import SamplingParams
 from vllm.utils.torch_utils import make_tensor_with_pad
 from vllm.v1.outputs import LogprobsLists
 from vllm.v1.sample.logits_processor import LogitsProcessors
-from vllm.v1.sample.logits_processor.builtin import (
-    LogitBiasLogitsProcessor,
-    MinTokensLogitsProcessor,
-)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
 
 from vllm_metal.pytorch_backend.tensor_bridge import mlx_to_torch
 
 GREEDY_TEMPERATURE_EPS = 1e-5
+_EMPTY_LOGITSPROCS = LogitsProcessors()
 
 
 @dataclass(frozen=True)
@@ -41,10 +38,7 @@ class SamplingBatch:
     ``SamplingMetadata`` construction out of ``model_runner.py`` while the
     runner is being slimmed down.
 
-    Today it owns only the sampling-side state for one step. As more per-step
-    batch state moves out of ``model_runner.py``, this should evolve into a
-    fuller ``MetalInputBatch``-style owner that can absorb request indexing,
-    token views, generators, logits processor ownership, and metadata refresh.
+    Today it owns only the sampling-side state for one step.
     """
 
     def __init__(
@@ -55,7 +49,6 @@ class SamplingBatch:
         *,
         vocab_size: int,
         device: torch.device,
-        logitsprocs: LogitsProcessors | None = None,
         generators: dict[int, torch.Generator] | None = None,
     ) -> None:
         batch_size = len(sampling_params_list)
@@ -77,7 +70,6 @@ class SamplingBatch:
         self.output_token_id_lists = list(output_token_id_lists)
         self.vocab_size = vocab_size
         self.device = device
-        self.logitsprocs = logitsprocs or LogitsProcessors()
         self.generators = {} if generators is None else generators
         self.all_greedy = all(
             sampling_params.temperature < GREEDY_TEMPERATURE_EPS
@@ -170,16 +162,6 @@ class SamplingBatch:
 
     def can_use_native_greedy(self) -> bool:
         """Return whether MLX argmax matches the requested sampling behavior."""
-        # MinTokens and LogitBias are the only non-argmax-invariant builtins, and
-        # both are no-ops unless their request params are set. Gate on those params
-        # below so standard greedy decode uses native MLX argmax instead of bridging
-        # the full-vocab logits to the torch sampler every step. Any other
-        # non-argmax-invariant processor forces the safe torch path.
-        if any(
-            type(proc) not in (MinTokensLogitsProcessor, LogitBiasLogitsProcessor)
-            for proc in self.logitsprocs.non_argmax_invariant
-        ):
-            return False
         return all(
             sampling_params.temperature < GREEDY_TEMPERATURE_EPS
             and sampling_params.top_k <= 0
@@ -190,8 +172,6 @@ class SamplingBatch:
             and sampling_params.logprobs is None
             and not sampling_params.allowed_token_ids
             and not sampling_params.bad_words_token_ids
-            and not sampling_params.logit_bias
-            and (sampling_params.min_tokens or 0) == 0
             for sampling_params in self.sampling_params_list
         )
 
@@ -332,7 +312,7 @@ class SamplingBatch:
             no_penalties=self.no_penalties,
             allowed_token_ids_mask=self._make_allowed_token_ids_mask(),
             bad_words_token_ids=self._make_bad_words_token_ids(),
-            logitsprocs=self.logitsprocs,
+            logitsprocs=_EMPTY_LOGITSPROCS,
             logprob_token_ids=None,
         )
 
@@ -387,7 +367,6 @@ def sample_decode_tokens(
     device: torch.device,
     *,
     vocab_size: int,
-    logitsprocs: LogitsProcessors | None = None,
 ) -> _SamplingResult:
     """Sample one token per decode request from evaluated logits.
 
@@ -398,8 +377,6 @@ def sample_decode_tokens(
         sampler: vLLM Sampler instance.
         device: PyTorch device for the torch bridge path.
         vocab_size: Model vocabulary size.
-        logitsprocs: Optional logits processors.
-
     Returns:
         Sampled token IDs and optional logprobs, one row per decode request.
     """
@@ -427,7 +404,6 @@ def sample_decode_tokens(
         output_tokens_list,
         vocab_size=vocab_size,
         device=device,
-        logitsprocs=logitsprocs,
         generators=generators,
     )
     return sample_from_logits(decode_logits, batch, sampler, device)
@@ -442,7 +418,6 @@ def sample_prefill_tokens(
     device: torch.device,
     *,
     vocab_size: int,
-    logitsprocs: LogitsProcessors | None = None,
 ) -> _SamplingResult:
     """Sample one token per prefill request from the last logit position.
 
@@ -454,8 +429,6 @@ def sample_prefill_tokens(
         sampler: vLLM Sampler instance.
         device: PyTorch device for the torch bridge path.
         vocab_size: Model vocabulary size.
-        logitsprocs: Optional logits processors.
-
     Returns:
         Sampled token IDs and optional logprobs, one row per prefill request.
     """
@@ -485,7 +458,6 @@ def sample_prefill_tokens(
             [prompt_for_meta[prompt_len:]],
             vocab_size=vocab_size,
             device=device,
-            logitsprocs=logitsprocs,
             generators=generators,
         )
         result = sample_from_logits(last_logits, batch, sampler, device)

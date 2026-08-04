@@ -26,7 +26,6 @@ from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
-from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.core.sched.output import (
     CachedRequestData,
     GrammarOutput,
@@ -40,7 +39,6 @@ from vllm.v1.outputs import (
     LogprobsLists,
     ModelRunnerOutput,
 )
-from vllm.v1.sample.logits_processor import build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
 
@@ -316,18 +314,6 @@ class MetalModelRunner:
 
         # vLLM Sampler for token sampling with temperature, top_k, top_p support
         self._sampler = Sampler()
-
-        # Build logits processors (includes custom plugins from entry-points)
-        pin_memory = is_pin_memory_available()
-        custom_lp = vllm_config.model_config.logits_processors
-        custom_logitsprocs = tuple(custom_lp) if custom_lp is not None else ()
-        self._logitsprocs = build_logitsprocs(
-            vllm_config,
-            device,
-            pin_memory,
-            self._is_pooling,
-            custom_logitsprocs,
-        )
 
         # vLLM v1 async scheduling calls sample_tokens after execute_model.
         # Keep the latest execution output so sample_tokens can return it.
@@ -847,7 +833,6 @@ class MetalModelRunner:
             output_token_id_lists,
             vocab_size=self._vocab_size,
             device=self.device,
-            logitsprocs=self._logitsprocs,
             generators=generators,
         ).make_sampling_metadata()
 
@@ -884,7 +869,6 @@ class MetalModelRunner:
             [[]],
             vocab_size=vocab_size,
             device=self.device,
-            logitsprocs=self._logitsprocs,
             generators=generators,
         )
         result = sample_from_logits(last_logits, batch, self._sampler, self.device)
@@ -946,7 +930,6 @@ class MetalModelRunner:
             output_tokens_list,
             vocab_size=vocab_size,
             device=self.device,
-            logitsprocs=self._logitsprocs,
             generators=generators,
         )
         result = sample_from_logits(
@@ -994,7 +977,6 @@ class MetalModelRunner:
                 [state.token_ids[state.prompt_len :]],
                 vocab_size=vocab_size,
                 device=self.device,
-                logitsprocs=self._logitsprocs,
                 generators=generators,
             )
             result = sample_from_logits(last_logits, batch, self._sampler, self.device)
@@ -1278,7 +1260,6 @@ class MetalModelRunner:
 
         # ---- sample tokens ----
         vocab_size = self._vocab_size
-        logitsprocs = self._logitsprocs
         decode_token_ids: list[list[int]] = [[] for _ in decode_reqs]
         decode_logprobs_rows: list[LogprobsLists | None] = [None for _ in decode_reqs]
         if has_scheduled_drafts:
@@ -1294,7 +1275,6 @@ class MetalModelRunner:
                     logits,
                     [req for _, req, _ in spec_items],
                     [segment for _, _, segment in spec_items],
-                    logitsprocs=logitsprocs,
                 )
                 for (decode_index, _, _), sampled_ids in zip(
                     spec_items,
@@ -1335,7 +1315,6 @@ class MetalModelRunner:
                     output_tokens_list,
                     vocab_size=vocab_size,
                     device=self.device,
-                    logitsprocs=logitsprocs,
                     generators=generators,
                 )
                 plain_result = sample_from_logits(
@@ -1361,7 +1340,6 @@ class MetalModelRunner:
                 self._sampler,
                 self.device,
                 vocab_size=vocab_size,
-                logitsprocs=logitsprocs,
             )
             decode_token_ids = [[token_id] for token_id in decode_result.token_ids]
             decode_logprobs = decode_result.logprobs
@@ -1373,7 +1351,6 @@ class MetalModelRunner:
             self._sampler,
             self.device,
             vocab_size=vocab_size,
-            logitsprocs=logitsprocs,
         )
 
         # ---- update decode state ----
@@ -1459,7 +1436,6 @@ class MetalModelRunner:
             cu_seqlens=cu_seqlens,
             num_decode_segments=num_decode_segments,
             num_speculative_tokens=num_speculative_tokens,
-            logitsprocs=self._logitsprocs,
             finished_req_ids=scheduler_output.finished_req_ids,
         )
         self._draft_token_ids = (
@@ -1573,7 +1549,6 @@ class MetalModelRunner:
             self._spec_decode_preflight_reqs(scheduler_output),
             paged_attention_enabled=self._paged_attention_runtime is not None,
             is_hybrid=self.is_hybrid,
-            logitsprocs=self._logitsprocs,
             use_async_scheduling=self.use_async_scheduling,
             speculative_config=self.vllm_config.speculative_config,
         )
