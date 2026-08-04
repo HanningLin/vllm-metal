@@ -165,10 +165,8 @@ class TestDraftModelSpecDecode:
         # not the engine loop.
         real_mismatches: list[tuple[int, int, int, float]] = []
 
-        def tie_checking_verify(logits, decode_reqs, decode_segments, *, logitsprocs):
-            result = original_verify(
-                logits, decode_reqs, decode_segments, logitsprocs=logitsprocs
-            )
+        def tie_checking_verify(logits, decode_reqs, decode_segments):
+            result = original_verify(logits, decode_reqs, decode_segments)
             # verify stops at the first per-segment mismatch, so accepted =
             # len(output) - 1 locates the one rejected draft (if any).
             for segment, output_ids in zip(decode_segments, result, strict=True):
