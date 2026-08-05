@@ -9,6 +9,7 @@ from types import ModuleType, SimpleNamespace
 import pytest
 import torch
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
+from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import SamplingParams
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import AttentionSelectorConfig
@@ -81,8 +82,9 @@ class TestMetalPlatform:
         sampling_params: SamplingParams,
         control: str,
     ) -> None:
-        with pytest.raises(NotImplementedError, match=control):
+        with pytest.raises(VLLMValidationError, match=control) as exc_info:
             MetalPlatform.validate_request({}, sampling_params)
+        assert exc_info.value.parameter == control
 
     def test_check_and_update_config_rejects_pipeline_with_tensor_parallel(
         self,

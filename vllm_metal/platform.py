@@ -224,6 +224,7 @@ class MetalPlatform(Platform):
         """Reject request options that Metal cannot apply correctly."""
         # Keep this import out of module scope: platform discovery imports this
         # module before vLLM finishes selecting the active platform.
+        from vllm.exceptions import VLLMValidationError
         from vllm.sampling_params import SamplingParams
 
         if not isinstance(params, SamplingParams):
@@ -240,9 +241,10 @@ class MetalPlatform(Platform):
         ]
         if unsupported_controls:
             controls = ", ".join(unsupported_controls)
-            raise NotImplementedError(
+            raise VLLMValidationError(
                 "vllm-metal does not support sampling controls backed by "
-                f"vLLM logits processors ({controls})."
+                f"vLLM logits processors ({controls}).",
+                parameter=unsupported_controls[0],
             )
 
     @classmethod
