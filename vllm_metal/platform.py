@@ -220,6 +220,34 @@ class MetalPlatform(Platform):
         mx.random.seed(seed)
 
     @classmethod
+    def validate_request(cls, processed_inputs: object, params: object) -> None:
+        """Reject request options that Metal cannot apply correctly."""
+        # Keep this import out of module scope: platform discovery imports this
+        # module before vLLM finishes selecting the active platform.
+        from vllm.exceptions import VLLMValidationError
+        from vllm.sampling_params import SamplingParams
+
+        if not isinstance(params, SamplingParams):
+            return
+
+        unsupported_controls = [
+            name
+            for name, enabled in (
+                ("min_p", params.min_p > 0.0),
+                ("logit_bias", bool(params.logit_bias)),
+                ("min_tokens", params.min_tokens > 0),
+            )
+            if enabled
+        ]
+        if unsupported_controls:
+            controls = ", ".join(unsupported_controls)
+            raise VLLMValidationError(
+                "vllm-metal does not support sampling controls backed by "
+                f"vLLM logits processors ({controls}).",
+                parameter=unsupported_controls[0],
+            )
+
+    @classmethod
     def get_torch_device(cls, device_id: int = 0) -> torch.device:
         """Get the corresponding PyTorch device.
 

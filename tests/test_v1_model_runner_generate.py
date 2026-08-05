@@ -8,6 +8,7 @@ from unittest.mock import Mock
 import mlx.core as mx
 import numpy as np
 import pytest
+import torch
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
@@ -117,6 +118,36 @@ class TestDrafterReleaseOnLifecycle:
 class TestV1MetalModelRunnerGenerate:
     def _make_runner(self) -> mr.MetalModelRunner:
         return make_stub_runner(tokenizer=object())
+
+    @pytest.mark.parametrize(
+        ("configured_processors", "installed_processors"),
+        [
+            ([object], ()),
+            (None, (object(),)),
+        ],
+        ids=["configured", "installed-plugin"],
+    )
+    def test_init_rejects_custom_logits_processors(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        configured_processors: list[type] | None,
+        installed_processors: tuple[object, ...],
+    ) -> None:
+        monkeypatch.setattr(
+            mr, "entry_points", lambda **_: installed_processors, raising=False
+        )
+        vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(
+                logits_processors=configured_processors,
+                runner_type="generate",
+            ),
+            cache_config=SimpleNamespace(),
+            scheduler_config=SimpleNamespace(async_scheduling=False),
+            speculative_config=None,
+        )
+
+        with pytest.raises(NotImplementedError, match="custom logits processors"):
+            mr.MetalModelRunner(vllm_config, torch.device("cpu"))
 
     def test_warm_up_propagates_dummy_forward_failure(self) -> None:
         runner = self._make_runner()
@@ -1320,7 +1351,10 @@ class TestV1MetalModelRunnerExecuteModel:
             has_structured_output_requests=False,
         )
 
-    def _make_new_request(self, req_id: str = "new") -> NewRequestData:
+    def _make_new_request(
+        self,
+        req_id: str = "new",
+    ) -> NewRequestData:
         return NewRequestData(
             req_id=req_id,
             prompt_token_ids=[1],

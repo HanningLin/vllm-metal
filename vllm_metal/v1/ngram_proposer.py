@@ -172,7 +172,6 @@ class NgramProposer:
                 ctx.prefill_reqs,
                 ctx.prefill_result_modes,
                 ctx.request_states,
-                logitsprocs=ctx.logitsprocs,
             )
         )
         if not drafting:

@@ -86,7 +86,6 @@ def _context(
         cu_seqlens=[],
         num_decode_segments=len(decode_reqs),
         num_speculative_tokens=num_speculative_tokens,
-        logitsprocs=None,
         finished_req_ids=finished_req_ids or set(),
     )
 

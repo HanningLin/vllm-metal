@@ -67,7 +67,6 @@ def make_stub_runner(
         "use_async_scheduling": True,
         "device": torch.device("cpu"),
         "_sampler": None,
-        "_logitsprocs": None,
         "_structured_output_applier": MetalStructuredOutputApplier(),
         "_lora": MetalLoRARuntime(),
         "_yoco_cache_mapping": None,

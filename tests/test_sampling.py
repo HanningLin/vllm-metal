@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for Metal sampling with vLLM Sampler integration."""
 
-from types import SimpleNamespace
-
 import mlx.core as mx
 import numpy as np
 import pytest
@@ -13,12 +11,7 @@ from vllm.utils.torch_utils import make_tensor_with_pad
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.outputs import LogprobsLists
-from vllm.v1.sample.logits_processor import (
-    BatchUpdate,
-    LogitsProcessor,
-    LogitsProcessors,
-    build_logitsprocs,
-)
+from vllm.v1.sample.logits_processor import LogitsProcessors
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
 
@@ -311,17 +304,13 @@ class TestV1SeededSamplingGenerator:
 
 class TestV1SamplingBatch:
     @staticmethod
-    def _batch(
-        params_list: list[SamplingParams],
-        logitsprocs: LogitsProcessors | None = None,
-    ) -> SamplingBatch:
+    def _batch(params_list: list[SamplingParams]) -> SamplingBatch:
         return SamplingBatch(
             params_list,
             [[1]] * len(params_list),
             [[]] * len(params_list),
             vocab_size=VOCAB_SIZE,
             device=torch.device("cpu"),
-            logitsprocs=logitsprocs,
         )
 
     def test_can_use_native_greedy_requires_greedy_without_filters(self) -> None:
@@ -357,72 +346,6 @@ class TestV1SamplingBatch:
         bad_sp = SamplingParams(temperature=0.0)
         bad_sp._bad_words_token_ids = [[99]]
         assert not self._batch([bad_sp]).can_use_native_greedy()
-
-    def test_native_greedy_allows_dormant_builtin_logits_processors(self) -> None:
-        vllm_config = SimpleNamespace(
-            speculative_config=None,
-            scheduler_config=SimpleNamespace(max_num_seqs=4),
-        )
-        logitsprocs = build_logitsprocs(
-            vllm_config,
-            torch.device("cpu"),
-            is_pin_memory=False,
-            is_pooling_model=False,
-        )
-        batch = self._batch([SamplingParams(temperature=0.0)], logitsprocs)
-
-        assert batch.can_use_native_greedy()
-
-    @pytest.mark.parametrize(
-        ("logit_bias", "min_tokens"),
-        [
-            ({1: 5.0}, 0),
-            (None, 5),
-        ],
-        ids=["logit_bias", "min_tokens"],
-    )
-    def test_native_greedy_rejects_active_builtin_logits_processors(
-        self,
-        logit_bias: dict[int, float] | None,
-        min_tokens: int,
-    ) -> None:
-        vllm_config = SimpleNamespace(
-            speculative_config=None,
-            scheduler_config=SimpleNamespace(max_num_seqs=4),
-        )
-        logitsprocs = build_logitsprocs(
-            vllm_config,
-            torch.device("cpu"),
-            is_pin_memory=False,
-            is_pooling_model=False,
-        )
-        sampling_params = SamplingParams(
-            temperature=0.0,
-            logit_bias=logit_bias,
-            min_tokens=min_tokens,
-        )
-        batch = self._batch([sampling_params], logitsprocs)
-
-        assert not batch.can_use_native_greedy()
-
-    def test_native_greedy_rejects_unknown_non_argmax_processor(self) -> None:
-        class _UnknownNonArgmax(LogitsProcessor):
-            def __init__(self, *_args: object) -> None:
-                return None
-
-            def apply(self, logits: torch.Tensor) -> torch.Tensor:
-                return logits
-
-            def is_argmax_invariant(self) -> bool:
-                return False
-
-            def update_state(self, batch_update: BatchUpdate | None) -> None:
-                return None
-
-        logitsprocs = LogitsProcessors([_UnknownNonArgmax()])
-        batch = self._batch([SamplingParams(temperature=0.0)], logitsprocs)
-
-        assert not batch.can_use_native_greedy()
 
     def test_allowed_token_ids_constrains_greedy_sampling(self) -> None:
         """Greedy with allowed_token_ids must fall back and the constraint works."""
@@ -670,25 +593,6 @@ class TestV1SamplingBatch:
         assert completion_output.logprobs is not None
         assert completion_output.logprobs[0] is not None
         assert completion_output.logprobs[0][7].logprob == pytest.approx(-0.1)
-
-
-class TestV1SamplingMetadataLogitsProcessors:
-    @staticmethod
-    def _make_runner(vocab_size: int = 32) -> MetalModelRunner:
-        return make_stub_runner(model_args={"vocab_size": vocab_size})
-
-    def test_make_sampling_metadata_uses_runner_logitsprocs(self) -> None:
-        runner = self._make_runner()
-        expected_logitsprocs = LogitsProcessors()
-        runner._logitsprocs = expected_logitsprocs
-
-        metadata = runner._make_sampling_metadata(
-            sampling_params_list=[SamplingParams(temperature=0.0)],
-            prompt_token_id_lists=[[]],
-            output_token_id_lists=[[]],
-        )
-
-        assert metadata.logitsprocs is expected_logitsprocs
 
 
 class TestV1PenaltyTokenAccounting:
