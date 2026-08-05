@@ -235,38 +235,48 @@ class DefaultModelAdapter(ModelAdapter):
         if hf_config is None:
             return False
 
-        model_type = hf_config.model_type
-        if model_type in _TEXT_BACKBONE_OVERRIDE_TYPES:
+        model_type_from_hf = hf_config.model_type
+        if model_type_from_hf in _TEXT_BACKBONE_OVERRIDE_TYPES:
             return True
 
-        architectures = tuple(hf_config.architectures or ())
+        architectures_from_hf = tuple(hf_config.architectures or ())
         if not any(
-            arch in _TEXT_BACKBONE_OVERRIDE_ARCHITECTURES for arch in architectures
+            arch in _TEXT_BACKBONE_OVERRIDE_ARCHITECTURES
+            for arch in architectures_from_hf
         ):
             return False
 
-        quantization_config = getattr(hf_config, "quantization_config", None)
-        if isinstance(quantization_config, dict):
-            quant_method = quantization_config.get("quant_method")
+        quantization_config_from_hf = getattr(hf_config, "quantization_config", None)
+        if isinstance(quantization_config_from_hf, dict):
+            quant_method = quantization_config_from_hf.get("quant_method")
         else:
-            quant_method = getattr(quantization_config, "quant_method", None)
+            quant_method = getattr(quantization_config_from_hf, "quant_method", None)
         if quant_method == "fp8":
             return True
+
         # MLX affine checkpoints carry a top-level `quantization` dict.  The
         # same conditional-generation architecture string can describe a dense
         # text wrapper or a real VL model, so keep native only when the config
         # exposes the native VL contract.
-        mlx_quantization = getattr(hf_config, "quantization", None)
-        if not isinstance(mlx_quantization, dict) or "bits" not in mlx_quantization:
+        mlx_quantization_from_hf = getattr(hf_config, "quantization", None)
+        if (
+            not isinstance(mlx_quantization_from_hf, dict)
+            or "bits" not in mlx_quantization_from_hf
+        ):
             return False
-        return not self._has_native_qwen_vl_config(hf_config, model_type, architectures)
+        return not self._has_native_qwen_vl_config(
+            hf_config, model_type_from_hf, architectures_from_hf
+        )
 
     def _has_native_qwen_vl_config(
-        self, hf_config: Any, model_type: str, architectures: Sequence[str]
+        self,
+        hf_config: Any,
+        model_type_from_hf: str,
+        architectures_from_hf: Sequence[str],
     ) -> bool:
         if not (
-            model_type in _QWEN3_VL_MODEL_TYPES
-            or any(arch in _QWEN3_VL_ARCHITECTURES for arch in architectures)
+            model_type_from_hf in _QWEN3_VL_MODEL_TYPES
+            or any(arch in _QWEN3_VL_ARCHITECTURES for arch in architectures_from_hf)
         ):
             return False
         return getattr(hf_config, "vision_config", None) is not None
