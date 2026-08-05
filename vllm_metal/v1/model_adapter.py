@@ -196,18 +196,6 @@ _TEXT_BACKBONE_OVERRIDE_ARCHITECTURES: frozenset[str] = frozenset(
         "Qwen3_6MoeForConditionalGeneration",
     }
 )
-# MLX-quantized wrappers are only force-texted when no native multimodal
-# adapter covers the architecture (see _QWEN3_VL_ARCHITECTURES):
-# Qwen3_5ForConditionalGeneration has one, so its MLX checkpoints keep the
-# native path and image serving; the rest would run the bare language model
-# with unset mrope state and generate garbled output.
-_MLX_QUANT_TEXT_BACKBONE_ARCHITECTURES: frozenset[str] = frozenset(
-    {
-        "Qwen3_5MoeForConditionalGeneration",
-        "Qwen3_6ForConditionalGeneration",
-        "Qwen3_6MoeForConditionalGeneration",
-    }
-)
 _QWEN3_VL_MODEL_TYPES: frozenset[str] = frozenset({"qwen3_5", "qwen3_vl"})
 _QWEN3_VL_ARCHITECTURES: frozenset[str] = frozenset(
     {
@@ -239,40 +227,48 @@ class DefaultModelAdapter(ModelAdapter):
         marked multimodal even when served text-only, and both quantized
         families diverge under mlx_vlm.load() — FP8 fails on
         `*_weight_scale_inv` tensors, while MLX affine checkpoints load but,
-        for architectures with no native multimodal adapter, run the bare
-        language model with unset mrope state and generate garbled output.
-        Both route through the mlx_lm text loader instead; MLX-quant
-        wrappers covered by a native adapter keep the multimodal path.
+        unless the config exposes a real VL shape, run the bare language model
+        with unset mrope state and generate garbled output.  Both route through
+        the mlx_lm text loader instead; MLX-quant wrappers with a native VL
+        config keep the multimodal path.
         """
         if hf_config is None:
             return False
 
-        model_type = getattr(hf_config, "model_type", "")
-        if model_type in _TEXT_BACKBONE_OVERRIDE_TYPES:
+        model_type_from_hf = hf_config.model_type
+        if model_type_from_hf in _TEXT_BACKBONE_OVERRIDE_TYPES:
             return True
 
-        architectures = getattr(hf_config, "architectures", ()) or ()
-        if not any(
-            arch in _TEXT_BACKBONE_OVERRIDE_ARCHITECTURES for arch in architectures
-        ):
+        architectures_from_hf = tuple(hf_config.architectures or ())
+        has_text_backbone_architecture = any(
+            arch in _TEXT_BACKBONE_OVERRIDE_ARCHITECTURES
+            for arch in architectures_from_hf
+        )
+        if not has_text_backbone_architecture:
             return False
 
-        quantization_config = getattr(hf_config, "quantization_config", None)
-        if isinstance(quantization_config, dict):
-            quant_method = quantization_config.get("quant_method")
-        else:
-            quant_method = getattr(quantization_config, "quant_method", None)
-        if quant_method == "fp8":
+        if self._has_fp8_quantization_config(hf_config):
             return True
-        # MLX affine checkpoints carry a top-level `quantization` dict; only
-        # architectures without a native multimodal adapter are force-texted
-        # (see _MLX_QUANT_TEXT_BACKBONE_ARCHITECTURES).
-        if not any(
-            arch in _MLX_QUANT_TEXT_BACKBONE_ARCHITECTURES for arch in architectures
-        ):
-            return False
-        mlx_quantization = getattr(hf_config, "quantization", None)
-        return isinstance(mlx_quantization, dict) and "bits" in mlx_quantization
+
+        # MLX affine Qwen3.5/Qwen3.6 text wrappers may still carry a
+        # vision_config, but mlx_vlm drives those text-only checkpoints with
+        # unset mRoPE state and produces garbled output.  Real Qwen3-VL uses
+        # Qwen3VLForConditionalGeneration, which is not in the text-wrapper
+        # architecture set above and therefore keeps the native path.
+        return self._has_mlx_quantized_weights(hf_config)
+
+    def _has_fp8_quantization_config(self, hf_config: Any) -> bool:
+        quantization_config_from_hf = getattr(hf_config, "quantization_config", None)
+        if isinstance(quantization_config_from_hf, dict):
+            return quantization_config_from_hf.get("quant_method") == "fp8"
+        return getattr(quantization_config_from_hf, "quant_method", None) == "fp8"
+
+    def _has_mlx_quantized_weights(self, hf_config: Any) -> bool:
+        mlx_quantization_from_hf = getattr(hf_config, "quantization", None)
+        return (
+            isinstance(mlx_quantization_from_hf, dict)
+            and "bits" in mlx_quantization_from_hf
+        )
 
     def should_force_text_backbone(self, hf_config: Any) -> bool:
         """Whether the current serve mode should use the text-only path.
