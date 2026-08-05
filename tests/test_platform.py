@@ -9,6 +9,7 @@ from types import ModuleType, SimpleNamespace
 import pytest
 import torch
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
+from vllm.sampling_params import SamplingParams
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import AttentionSelectorConfig
 from vllm.v1.core.kv_cache_utils import (
@@ -65,6 +66,23 @@ class TestMetalPlatform:
         MetalPlatform.set_device(torch.device("cpu", 0))  # index 0 -> ok
         with pytest.raises(ValueError, match="only supports device 0"):
             MetalPlatform.set_device(torch.device("cpu", 1))
+
+    @pytest.mark.parametrize(
+        ("sampling_params", "control"),
+        [
+            (SamplingParams(min_p=0.1), "min_p"),
+            (SamplingParams(logit_bias={1: 2.0}), "logit_bias"),
+            (SamplingParams(min_tokens=2), "min_tokens"),
+        ],
+        ids=["min-p", "logit-bias", "min-tokens"],
+    )
+    def test_validate_request_rejects_logits_processor_controls(
+        self,
+        sampling_params: SamplingParams,
+        control: str,
+    ) -> None:
+        with pytest.raises(NotImplementedError, match=control):
+            MetalPlatform.validate_request({}, sampling_params)
 
     def test_check_and_update_config_rejects_pipeline_with_tensor_parallel(
         self,

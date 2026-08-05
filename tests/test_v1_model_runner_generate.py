@@ -1354,46 +1354,17 @@ class TestV1MetalModelRunnerExecuteModel:
     def _make_new_request(
         self,
         req_id: str = "new",
-        sampling_params: SamplingParams | None = None,
     ) -> NewRequestData:
         return NewRequestData(
             req_id=req_id,
             prompt_token_ids=[1],
             mm_features=[],
-            sampling_params=sampling_params or SamplingParams(),
+            sampling_params=SamplingParams(),
             pooling_params=None,
             block_ids=([0],),
             num_computed_tokens=0,
             lora_request=None,
         )
-
-    @pytest.mark.parametrize(
-        ("sampling_params", "control"),
-        [
-            (SamplingParams(min_p=0.1), "min_p"),
-            (SamplingParams(logit_bias={1: 2.0}), "logit_bias"),
-            (SamplingParams(min_tokens=2), "min_tokens"),
-        ],
-        ids=["min-p", "logit-bias", "min-tokens"],
-    )
-    def test_new_request_rejects_unsupported_logits_processor_controls(
-        self,
-        sampling_params: SamplingParams,
-        control: str,
-    ) -> None:
-        runner = self._make_runner()
-        runner._prefill_single = Mock(return_value=(1, [], None))
-        new_req = self._make_new_request(sampling_params=sampling_params)
-
-        with pytest.raises(NotImplementedError, match=control):
-            runner._handle_new_requests(
-                mr._ExecutionBatch(),
-                [new_req],
-                self._make_scheduler_output(scheduled_new_reqs=[new_req]),
-            )
-
-        runner._prefill_single.assert_not_called()
-        assert "new" not in runner._request_states
 
     def test_returns_empty_output_directly_for_empty_batch(self) -> None:
         runner = self._make_runner()

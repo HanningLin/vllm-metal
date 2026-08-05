@@ -1839,26 +1839,6 @@ class MetalModelRunner:
         scheduler_output: SchedulerOutput,
     ) -> None:
         """Register new requests and execute any required per-request prefill."""
-        for new_req in new_reqs:
-            sampling_params = new_req.sampling_params
-            if sampling_params is None:
-                continue
-            unsupported_controls = [
-                name
-                for name, enabled in (
-                    ("min_p", sampling_params.min_p > 0.0),
-                    ("logit_bias", bool(sampling_params.logit_bias)),
-                    ("min_tokens", sampling_params.min_tokens > 0),
-                )
-                if enabled
-            ]
-            if unsupported_controls:
-                controls = ", ".join(unsupported_controls)
-                raise NotImplementedError(
-                    "vllm-metal does not support sampling controls backed by "
-                    f"vLLM logits processors ({controls}); request={new_req.req_id!r}."
-                )
-
         batch.new_reqs_by_id = {req.req_id: req for req in new_reqs}
 
         for new_req in new_reqs:

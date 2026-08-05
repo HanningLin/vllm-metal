@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import psutil
 import torch
 from vllm.platforms.interface import DeviceCapability, Platform, PlatformEnum
+from vllm.sampling_params import SamplingParams
 
 import vllm_metal.envs as envs
 from vllm_metal.config import get_config
@@ -218,6 +219,28 @@ class MetalPlatform(Platform):
         import mlx.core as mx
 
         mx.random.seed(seed)
+
+    @classmethod
+    def validate_request(cls, processed_inputs: object, params: object) -> None:
+        """Reject request options that Metal cannot apply correctly."""
+        if not isinstance(params, SamplingParams):
+            return
+
+        unsupported_controls = [
+            name
+            for name, enabled in (
+                ("min_p", params.min_p > 0.0),
+                ("logit_bias", bool(params.logit_bias)),
+                ("min_tokens", params.min_tokens > 0),
+            )
+            if enabled
+        ]
+        if unsupported_controls:
+            controls = ", ".join(unsupported_controls)
+            raise NotImplementedError(
+                "vllm-metal does not support sampling controls backed by "
+                f"vLLM logits processors ({controls})."
+            )
 
     @classmethod
     def get_torch_device(cls, device_id: int = 0) -> torch.device:
