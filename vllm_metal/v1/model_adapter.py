@@ -196,18 +196,6 @@ _TEXT_BACKBONE_OVERRIDE_ARCHITECTURES: frozenset[str] = frozenset(
         "Qwen3_6MoeForConditionalGeneration",
     }
 )
-# MLX-quantized wrappers are only force-texted when no native multimodal
-# adapter covers the architecture (see _QWEN3_VL_ARCHITECTURES):
-# Qwen3_5ForConditionalGeneration has one, so its MLX checkpoints keep the
-# native path and image serving; the rest would run the bare language model
-# with unset mrope state and generate garbled output.
-_MLX_QUANT_TEXT_BACKBONE_ARCHITECTURES: frozenset[str] = frozenset(
-    {
-        "Qwen3_5MoeForConditionalGeneration",
-        "Qwen3_6ForConditionalGeneration",
-        "Qwen3_6MoeForConditionalGeneration",
-    }
-)
 _QWEN3_VL_MODEL_TYPES: frozenset[str] = frozenset({"qwen3_5", "qwen3_vl"})
 _QWEN3_VL_ARCHITECTURES: frozenset[str] = frozenset(
     {
@@ -239,19 +227,19 @@ class DefaultModelAdapter(ModelAdapter):
         marked multimodal even when served text-only, and both quantized
         families diverge under mlx_vlm.load() — FP8 fails on
         `*_weight_scale_inv` tensors, while MLX affine checkpoints load but,
-        for architectures with no native multimodal adapter, run the bare
-        language model with unset mrope state and generate garbled output.
-        Both route through the mlx_lm text loader instead; MLX-quant
-        wrappers covered by a native adapter keep the multimodal path.
+        unless the config exposes a real VL shape, run the bare language model
+        with unset mrope state and generate garbled output.  Both route through
+        the mlx_lm text loader instead; MLX-quant wrappers with a native VL
+        config keep the multimodal path.
         """
         if hf_config is None:
             return False
 
-        model_type = getattr(hf_config, "model_type", "")
+        model_type = hf_config.model_type
         if model_type in _TEXT_BACKBONE_OVERRIDE_TYPES:
             return True
 
-        architectures = getattr(hf_config, "architectures", ()) or ()
+        architectures = tuple(hf_config.architectures or ())
         if not any(
             arch in _TEXT_BACKBONE_OVERRIDE_ARCHITECTURES for arch in architectures
         ):
@@ -264,15 +252,24 @@ class DefaultModelAdapter(ModelAdapter):
             quant_method = getattr(quantization_config, "quant_method", None)
         if quant_method == "fp8":
             return True
-        # MLX affine checkpoints carry a top-level `quantization` dict; only
-        # architectures without a native multimodal adapter are force-texted
-        # (see _MLX_QUANT_TEXT_BACKBONE_ARCHITECTURES).
-        if not any(
-            arch in _MLX_QUANT_TEXT_BACKBONE_ARCHITECTURES for arch in architectures
+        # MLX affine checkpoints carry a top-level `quantization` dict.  The
+        # same conditional-generation architecture string can describe a dense
+        # text wrapper or a real VL model, so keep native only when the config
+        # exposes the native VL contract.
+        mlx_quantization = getattr(hf_config, "quantization", None)
+        if not isinstance(mlx_quantization, dict) or "bits" not in mlx_quantization:
+            return False
+        return not self._has_native_qwen_vl_config(hf_config, model_type, architectures)
+
+    def _has_native_qwen_vl_config(
+        self, hf_config: Any, model_type: str, architectures: Sequence[str]
+    ) -> bool:
+        if not (
+            model_type in _QWEN3_VL_MODEL_TYPES
+            or any(arch in _QWEN3_VL_ARCHITECTURES for arch in architectures)
         ):
             return False
-        mlx_quantization = getattr(hf_config, "quantization", None)
-        return isinstance(mlx_quantization, dict) and "bits" in mlx_quantization
+        return getattr(hf_config, "vision_config", None) is not None
 
     def should_force_text_backbone(self, hf_config: Any) -> bool:
         """Whether the current serve mode should use the text-only path.

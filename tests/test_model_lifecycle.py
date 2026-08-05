@@ -329,6 +329,27 @@ class TestModelLifecycle:
 
         assert runner._is_vlm is False
 
+    def test_load_uses_adapter_override_for_qwen35_mlx_quant_dense_wrapper(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _stub_generation_model(monkeypatch, config=_text_config())
+        lifecycle, runner = _make_lifecycle(
+            model_config=_runner_model_config(
+                hf_config=SimpleNamespace(
+                    model_type="qwen3_5",
+                    architectures=["Qwen3_5ForConditionalGeneration"],
+                    quantization={"group_size": 64, "bits": 4, "mode": "affine"},
+                ),
+                is_multimodal_model=True,
+            )
+        )
+
+        lifecycle.load()
+
+        assert runner._is_vlm is False
+        assert runner._multimodal_adapter is None
+
     def test_load_multimodal_native_mode_keeps_qwen35_fp8_as_vlm(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -404,7 +425,7 @@ class TestModelLifecycle:
         )
         lifecycle, runner = _make_lifecycle(
             model_config=_runner_model_config(
-                hf_config=SimpleNamespace(model_type="phi3_v"),
+                hf_config=SimpleNamespace(model_type="phi3_v", architectures=[]),
                 is_multimodal_model=True,
             )
         )

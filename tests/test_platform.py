@@ -1407,7 +1407,7 @@ class TestMetalPlatform:
                 tokenizer=None,
                 max_model_len=128,
                 multimodal_config=sentinel,
-                hf_config=SimpleNamespace(model_type="qwen3_vl"),
+                hf_config=SimpleNamespace(model_type="qwen3_vl", architectures=[]),
                 is_hybrid=False,
             )
             vllm_config = SimpleNamespace(
