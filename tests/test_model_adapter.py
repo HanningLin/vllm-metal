@@ -87,11 +87,6 @@ class TestShouldForceTextBackbone:
                 "Qwen3VLForConditionalGeneration",
                 SimpleNamespace(spatial_merge_size=2),
             ),
-            (
-                "qwen3_5",
-                "Qwen3_5ForConditionalGeneration",
-                SimpleNamespace(spatial_merge_size=2),
-            ),
             # An arbitrary non-allowlisted multimodal model.
             ("llava", "LlavaForConditionalGeneration", None),
         ],
@@ -108,6 +103,20 @@ class TestShouldForceTextBackbone:
         adapter = DefaultModelAdapter()
         result = adapter.should_force_text_backbone(hf_config)
         assert result is False
+
+    def test_mlx_quant_qwen35_wrapper_uses_auto_override_with_vision_config(
+        self,
+    ) -> None:
+        hf_config = SimpleNamespace(
+            model_type="qwen3_5",
+            architectures=["Qwen3_5ForConditionalGeneration"],
+            quantization={"group_size": 64, "bits": 4, "mode": "affine"},
+            vision_config=SimpleNamespace(spatial_merge_size=2),
+            text_config=SimpleNamespace(model_type="qwen3_5_text"),
+        )
+        adapter = DefaultModelAdapter()
+        result = adapter.should_force_text_backbone(hf_config)
+        assert result is True
 
     def test_multimodal_native_mode_disables_mlx_quant_override(
         self, monkeypatch
@@ -408,6 +417,7 @@ class TestNormalizeModelConfig:
         [
             ("qwen3_5", "Qwen3_5ForConditionalGeneration"),
             ("qwen3_5_moe", "Qwen3_5MoeForConditionalGeneration"),
+            ("qwen3_6", "Qwen3_6ForConditionalGeneration"),
         ],
     )
     def test_clears_multimodal_config_for_mlx_quant_wrapper_in_auto_mode(

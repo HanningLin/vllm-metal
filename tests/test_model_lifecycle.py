@@ -340,6 +340,8 @@ class TestModelLifecycle:
                     model_type="qwen3_5",
                     architectures=["Qwen3_5ForConditionalGeneration"],
                     quantization={"group_size": 64, "bits": 4, "mode": "affine"},
+                    vision_config=SimpleNamespace(spatial_merge_size=2),
+                    text_config=SimpleNamespace(model_type="qwen3_5_text"),
                 ),
                 is_multimodal_model=True,
             )

@@ -250,15 +250,12 @@ class DefaultModelAdapter(ModelAdapter):
         if self._has_fp8_quantization_config(hf_config):
             return True
 
-        # MLX affine checkpoints carry a top-level `quantization` dict.  The
-        # same conditional-generation architecture string can describe a dense
-        # text wrapper or a real VL model, so keep native only when the config
-        # exposes the native VL contract.
-        if not self._has_mlx_quantized_weights(hf_config):
-            return False
-        return not self._has_native_qwen_vl_config(
-            hf_config, model_type_from_hf, architectures_from_hf
-        )
+        # MLX affine Qwen3.5/Qwen3.6 text wrappers may still carry a
+        # vision_config, but mlx_vlm drives those text-only checkpoints with
+        # unset mRoPE state and produces garbled output.  Real Qwen3-VL uses
+        # Qwen3VLForConditionalGeneration, which is not in the text-wrapper
+        # architecture set above and therefore keeps the native path.
+        return self._has_mlx_quantized_weights(hf_config)
 
     def _has_fp8_quantization_config(self, hf_config: Any) -> bool:
         quantization_config_from_hf = getattr(hf_config, "quantization_config", None)
@@ -272,19 +269,6 @@ class DefaultModelAdapter(ModelAdapter):
             isinstance(mlx_quantization_from_hf, dict)
             and "bits" in mlx_quantization_from_hf
         )
-
-    def _has_native_qwen_vl_config(
-        self,
-        hf_config: Any,
-        model_type_from_hf: str,
-        architectures_from_hf: Sequence[str],
-    ) -> bool:
-        if not (
-            model_type_from_hf in _QWEN3_VL_MODEL_TYPES
-            or any(arch in _QWEN3_VL_ARCHITECTURES for arch in architectures_from_hf)
-        ):
-            return False
-        return getattr(hf_config, "vision_config", None) is not None
 
     def should_force_text_backbone(self, hf_config: Any) -> bool:
         """Whether the current serve mode should use the text-only path.
