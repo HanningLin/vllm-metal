@@ -240,32 +240,37 @@ class DefaultModelAdapter(ModelAdapter):
             return True
 
         architectures_from_hf = tuple(hf_config.architectures or ())
-        if not any(
+        has_text_backbone_architecture = any(
             arch in _TEXT_BACKBONE_OVERRIDE_ARCHITECTURES
             for arch in architectures_from_hf
-        ):
+        )
+        if not has_text_backbone_architecture:
             return False
 
-        quantization_config_from_hf = getattr(hf_config, "quantization_config", None)
-        if isinstance(quantization_config_from_hf, dict):
-            quant_method = quantization_config_from_hf.get("quant_method")
-        else:
-            quant_method = getattr(quantization_config_from_hf, "quant_method", None)
-        if quant_method == "fp8":
+        if self._has_fp8_quantization_config(hf_config):
             return True
 
         # MLX affine checkpoints carry a top-level `quantization` dict.  The
         # same conditional-generation architecture string can describe a dense
         # text wrapper or a real VL model, so keep native only when the config
         # exposes the native VL contract.
-        mlx_quantization_from_hf = getattr(hf_config, "quantization", None)
-        if (
-            not isinstance(mlx_quantization_from_hf, dict)
-            or "bits" not in mlx_quantization_from_hf
-        ):
+        if not self._has_mlx_quantized_weights(hf_config):
             return False
         return not self._has_native_qwen_vl_config(
             hf_config, model_type_from_hf, architectures_from_hf
+        )
+
+    def _has_fp8_quantization_config(self, hf_config: Any) -> bool:
+        quantization_config_from_hf = getattr(hf_config, "quantization_config", None)
+        if isinstance(quantization_config_from_hf, dict):
+            return quantization_config_from_hf.get("quant_method") == "fp8"
+        return getattr(quantization_config_from_hf, "quant_method", None) == "fp8"
+
+    def _has_mlx_quantized_weights(self, hf_config: Any) -> bool:
+        mlx_quantization_from_hf = getattr(hf_config, "quantization", None)
+        return (
+            isinstance(mlx_quantization_from_hf, dict)
+            and "bits" in mlx_quantization_from_hf
         )
 
     def _has_native_qwen_vl_config(
