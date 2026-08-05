@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING
 import psutil
 import torch
 from vllm.platforms.interface import DeviceCapability, Platform, PlatformEnum
-from vllm.sampling_params import SamplingParams
 
 import vllm_metal.envs as envs
 from vllm_metal.config import get_config
@@ -223,6 +222,10 @@ class MetalPlatform(Platform):
     @classmethod
     def validate_request(cls, processed_inputs: object, params: object) -> None:
         """Reject request options that Metal cannot apply correctly."""
+        # Keep this import out of module scope: platform discovery imports this
+        # module before vLLM finishes selecting the active platform.
+        from vllm.sampling_params import SamplingParams
+
         if not isinstance(params, SamplingParams):
             return
 
