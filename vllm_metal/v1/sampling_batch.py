@@ -438,14 +438,14 @@ def sample_prefill_tokens(
     prompt_token_id_lists: list[list[int]] = []
     output_token_id_lists: list[list[int]] = []
     for pr in prefill_reqs:
-        prompt_for_meta = pr.full_prompt_token_ids
-        if prompt_for_meta is None:
-            prompt_for_meta = pr.token_ids
-        prompt_len = pr.prompt_len
-        if prompt_len is None:
-            prompt_len = len(prompt_for_meta)
-        prompt_token_id_lists.append(prompt_for_meta[:prompt_len])
-        output_token_id_lists.append(prompt_for_meta[prompt_len:])
+        token_ids = (
+            pr.full_prompt_token_ids
+            if pr.full_prompt_token_ids is not None
+            else pr.token_ids
+        )
+        prompt_len = pr.prompt_len if pr.prompt_len is not None else len(token_ids)
+        prompt_token_id_lists.append(token_ids[:prompt_len])
+        output_token_id_lists.append(token_ids[prompt_len:])
 
     last_logits = mx.stack(
         [
