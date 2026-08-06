@@ -109,13 +109,24 @@ class TestMetalPlatform:
         ):
             MetalPlatform.check_and_update_config(vllm_config)
 
-    @pytest.mark.parametrize("quantization", [None, "auto_awq", "gguf"])
+    @pytest.mark.parametrize(
+        ("quantization", "multimodal_config", "should_reject"),
+        [
+            (None, None, False),
+            ("auto_awq", None, True),
+            ("gguf", None, True),
+            ("auto_awq", SimpleNamespace(), False),
+        ],
+        ids=["safetensors", "text-awq", "text-gguf", "multimodal-awq"],
+    )
     def test_check_and_update_config_allows_pipeline_parallel(
         self,
         monkeypatch: pytest.MonkeyPatch,
         quantization: str | None,
+        multimodal_config: SimpleNamespace | None,
+        should_reject: bool,
     ) -> None:
-        """PP admits lazy MLX-LM loading and rejects proven eager loaders."""
+        """PP admits lazy loaders and rejects proven eager text loaders."""
         self._patch_stt_resolution(monkeypatch, is_stt=False)
         monkeypatch.setenv("VLLM_METAL_USE_PAGED_ATTENTION", "1")
         reset_config()
@@ -137,8 +148,15 @@ class TestMetalPlatform:
                     disable_cascade_attn=False,
                     tokenizer=None,
                     max_model_len=32768,
-                    multimodal_config=None,
-                    hf_config=SimpleNamespace(model_type="qwen3"),
+                    multimodal_config=multimodal_config,
+                    hf_config=(
+                        SimpleNamespace(
+                            model_type="qwen3_vl",
+                            architectures=["Qwen3VLForConditionalGeneration"],
+                        )
+                        if multimodal_config is not None
+                        else SimpleNamespace(model_type="qwen3")
+                    ),
                     is_hybrid=False,
                     quantization=quantization,
                 ),
@@ -154,7 +172,7 @@ class TestMetalPlatform:
                 lora_config=None,
             )
 
-            if quantization is not None:
+            if should_reject:
                 with pytest.raises(
                     NotImplementedError, match=r"AWQ or GGUF.*pipeline_parallel_size=1"
                 ):
