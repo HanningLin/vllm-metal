@@ -750,6 +750,21 @@ class MetalPlatform(Platform):
                 logger.info("STT: disabled async_scheduling")
             logger.info("STT model detected")
 
+        # The text AWQ and GGUF loaders materialize the full checkpoint before
+        # stage slicing. Multimodal and STT models take different loader paths.
+        if (
+            parallel_config.pipeline_parallel_size > 1
+            and model_config is not None
+            and model_config.multimodal_config is None
+            and model_config.quantization in ("auto_awq", "gguf")
+        ):
+            raise NotImplementedError(
+                "Pipeline parallelism does not support AWQ or GGUF checkpoints "
+                "because their loaders materialize the complete model on every "
+                "stage before stage slicing. Use "
+                "pipeline_parallel_size=1 or an MLX-LM safetensors checkpoint."
+            )
+
         # Data parallelism passed every admission guard above (including the
         # multimodal and STT rejections). Only now — after all fail-fasts, before
         # the engine connects — register the Apple-GPU worker patch at the Ray job

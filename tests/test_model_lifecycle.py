@@ -438,31 +438,28 @@ class TestModelLifecycle:
         assert runner._multimodal_adapter is None
         assert runner.encoder_cache is None
 
-    def test_load_separates_text_and_vlm_loader_paths(
+    def test_load_forced_text_backbone_uses_mlx_lm_loader(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         text_model = SimpleNamespace(config=_text_config())
         text_tokenizer = object()
-        vlm_model = _qwen35_vlm_model()
-        vlm_tokenizer = object()
 
         class _StubAWQLoader:
             @classmethod
             def for_model(cls, _model_name: str) -> None:
                 return None
 
+        def _load_text(
+            _model_name: str,
+            *,
+            tokenizer_config: object,
+            lazy: bool,
+        ) -> tuple[object, object]:
+            return text_model, text_tokenizer
+
         monkeypatch.setattr(model_lifecycle, "AWQQuantLoader", _StubAWQLoader)
-        monkeypatch.setattr(
-            model_lifecycle,
-            "mlx_lm_load",
-            lambda *_args, **_kwargs: (text_model, text_tokenizer),
-        )
-        monkeypatch.setattr(
-            model_lifecycle,
-            "mlx_vlm_load",
-            lambda _model_name: (vlm_model, vlm_tokenizer),
-        )
+        monkeypatch.setattr(model_lifecycle, "mlx_lm_load", _load_text)
 
         lifecycle, runner = _make_lifecycle(
             model_config=_runner_model_config(
@@ -476,8 +473,22 @@ class TestModelLifecycle:
         assert runner.tokenizer is text_tokenizer
         assert runner._is_vlm is False
 
+    def test_load_vlm_pipeline_parallel_uses_mlx_vlm_lazy_loading(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        vlm_model = _qwen35_vlm_model()
+        vlm_tokenizer = object()
+        vlm_lazy: list[bool] = []
+
+        def _load_vlm(_model_name: str, *, lazy: bool) -> tuple[object, object]:
+            vlm_lazy.append(lazy)
+            return vlm_model, vlm_tokenizer
+
+        monkeypatch.setattr(model_lifecycle, "mlx_vlm_load", _load_vlm)
         monkeypatch.setenv("VLLM_METAL_MULTIMODAL_MODE", "multimodal-native")
         reset_config()
+
         lifecycle, runner = _make_lifecycle(
             model_config=_runner_model_config(
                 hf_config=SimpleNamespace(
@@ -488,11 +499,13 @@ class TestModelLifecycle:
                 is_multimodal_model=True,
             )
         )
+        runner.pp = PipelineGroup(SimpleNamespace(rank=lambda: 0, size=lambda: 2))
         lifecycle.load()
 
         assert runner.model is vlm_model
         assert runner.tokenizer is vlm_tokenizer
         assert runner._is_vlm is True
+        assert vlm_lazy == [True]
 
     @pytest.mark.slow
     def test_load_auto_mode_real_qwen_fp8_checkpoint(

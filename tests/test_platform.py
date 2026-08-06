@@ -109,10 +109,24 @@ class TestMetalPlatform:
         ):
             MetalPlatform.check_and_update_config(vllm_config)
 
-    def test_check_and_update_config_allows_pipeline_parallel(
-        self, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize(
+        ("quantization", "multimodal_config", "rejects_pp"),
+        [
+            (None, None, False),
+            ("auto_awq", None, True),
+            ("gguf", None, True),
+            ("auto_awq", SimpleNamespace(), False),
+        ],
+        ids=["safetensors", "text-awq", "text-gguf", "multimodal-awq"],
+    )
+    def test_check_and_update_config_handles_pipeline_loader_routes(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        quantization: str | None,
+        multimodal_config: SimpleNamespace | None,
+        rejects_pp: bool,
     ) -> None:
-        """PP>1 with TP=1 is allowed and selects the multiproc executor."""
+        """PP admits lazy loaders and rejects proven eager text loaders."""
         self._patch_stt_resolution(monkeypatch, is_stt=False)
         monkeypatch.setenv("VLLM_METAL_USE_PAGED_ATTENTION", "1")
         reset_config()
@@ -134,13 +148,18 @@ class TestMetalPlatform:
                     disable_cascade_attn=False,
                     tokenizer=None,
                     max_model_len=32768,
-                    multimodal_config=None,
-                    hf_config=SimpleNamespace(model_type="qwen3"),
+                    multimodal_config=multimodal_config,
+                    hf_config=(
+                        SimpleNamespace(
+                            model_type="qwen3_vl",
+                            architectures=["Qwen3VLForConditionalGeneration"],
+                        )
+                        if multimodal_config is not None
+                        else SimpleNamespace(model_type="qwen3")
+                    ),
                     is_hybrid=False,
+                    quantization=quantization,
                 ),
-                # PP requires synchronous scheduling: the first stage has no
-                # sampler and rebuilds tokens from the scheduler, so a valid PP
-                # config sets async_scheduling False (see the reject test below).
                 scheduler_config=SimpleNamespace(
                     async_scheduling=False,
                     enable_chunked_prefill=True,
@@ -151,10 +170,15 @@ class TestMetalPlatform:
                 lora_config=None,
             )
 
-            # Does not raise: PP>1 with TP=1 and sync scheduling falls through.
+            if rejects_pp:
+                with pytest.raises(
+                    NotImplementedError, match=r"AWQ or GGUF.*pipeline_parallel_size=1"
+                ):
+                    MetalPlatform.check_and_update_config(vllm_config)
+                return
+
             MetalPlatform.check_and_update_config(vllm_config)
 
-            # "uni" cannot host two stages, so PP>1 defaults to the mp executor.
             assert vllm_config.parallel_config.distributed_executor_backend == "mp"
             assert (
                 vllm_config.parallel_config.worker_cls
