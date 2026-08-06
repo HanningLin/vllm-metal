@@ -432,40 +432,37 @@ def sample_prefill_tokens(
     Returns:
         Sampled token IDs and optional logprobs, one row per prefill request.
     """
-    prefill_next_tokens: list[int] = []
-    logprobs_rows: list[LogprobsLists | None] = []
-    for j, pr in enumerate(prefill_reqs):
-        last_idx = cu_seqlens[num_decode + j + 1] - 1
-        last_logits = logits[0, last_idx : last_idx + 1, :]  # (1, vocab)
+    if not prefill_reqs:
+        return _SamplingResult([])
 
-        if pr.full_prompt_token_ids is not None:
-            prompt_len = len(pr.full_prompt_token_ids)
-        elif pr.prompt_len is not None:
-            prompt_len = pr.prompt_len
-        else:
-            prompt_len = len(pr.token_ids)
-
-        prompt_for_meta = (
+    prompt_token_id_lists: list[list[int]] = []
+    output_token_id_lists: list[list[int]] = []
+    for pr in prefill_reqs:
+        token_ids = (
             pr.full_prompt_token_ids
             if pr.full_prompt_token_ids is not None
             else pr.token_ids
         )
-        generators = {} if pr.generator is None else {0: pr.generator}
+        prompt_len = pr.prompt_len if pr.prompt_len is not None else len(token_ids)
+        prompt_token_id_lists.append(token_ids[:prompt_len])
+        output_token_id_lists.append(token_ids[prompt_len:])
 
-        batch = SamplingBatch(
-            [pr.sampling_params],
-            [prompt_for_meta[:prompt_len]],
-            [prompt_for_meta[prompt_len:]],
-            vocab_size=vocab_size,
-            device=device,
-            generators=generators,
-        )
-        result = sample_from_logits(last_logits, batch, sampler, device)
-        [next_token] = result.token_ids
-        prefill_next_tokens.append(next_token)
-        logprobs_rows.append(result.logprobs)
-
-    return _SamplingResult(
-        prefill_next_tokens,
-        SamplingBatch.merge_logprobs_rows(logprobs_rows),
+    last_logits = mx.stack(
+        [
+            logits[0, cu_seqlens[num_decode + j + 1] - 1, :]
+            for j in range(len(prefill_reqs))
+        ]
     )
+    batch = SamplingBatch(
+        [pr.sampling_params for pr in prefill_reqs],
+        prompt_token_id_lists,
+        output_token_id_lists,
+        vocab_size=vocab_size,
+        device=device,
+        generators={
+            j: pr.generator
+            for j, pr in enumerate(prefill_reqs)
+            if pr.generator is not None
+        },
+    )
+    return sample_from_logits(last_logits, batch, sampler, device)
