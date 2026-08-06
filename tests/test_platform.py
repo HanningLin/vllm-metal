@@ -110,7 +110,7 @@ class TestMetalPlatform:
             MetalPlatform.check_and_update_config(vllm_config)
 
     @pytest.mark.parametrize(
-        ("quantization", "multimodal_config", "should_reject"),
+        ("quantization", "multimodal_config", "rejects_pp"),
         [
             (None, None, False),
             ("auto_awq", None, True),
@@ -119,12 +119,12 @@ class TestMetalPlatform:
         ],
         ids=["safetensors", "text-awq", "text-gguf", "multimodal-awq"],
     )
-    def test_check_and_update_config_allows_pipeline_parallel(
+    def test_check_and_update_config_handles_pipeline_loader_routes(
         self,
         monkeypatch: pytest.MonkeyPatch,
         quantization: str | None,
         multimodal_config: SimpleNamespace | None,
-        should_reject: bool,
+        rejects_pp: bool,
     ) -> None:
         """PP admits lazy loaders and rejects proven eager text loaders."""
         self._patch_stt_resolution(monkeypatch, is_stt=False)
@@ -160,8 +160,6 @@ class TestMetalPlatform:
                     is_hybrid=False,
                     quantization=quantization,
                 ),
-                # PP requires synchronous scheduling: the first stage has no
-                # sampler and rebuilds tokens from the scheduler.
                 scheduler_config=SimpleNamespace(
                     async_scheduling=False,
                     enable_chunked_prefill=True,
@@ -172,17 +170,15 @@ class TestMetalPlatform:
                 lora_config=None,
             )
 
-            if should_reject:
+            if rejects_pp:
                 with pytest.raises(
                     NotImplementedError, match=r"AWQ or GGUF.*pipeline_parallel_size=1"
                 ):
                     MetalPlatform.check_and_update_config(vllm_config)
                 return
 
-            # Does not raise: PP>1 with TP=1 and sync scheduling falls through.
             MetalPlatform.check_and_update_config(vllm_config)
 
-            # "uni" cannot host two stages, so PP>1 defaults to the mp executor.
             assert vllm_config.parallel_config.distributed_executor_backend == "mp"
             assert (
                 vllm_config.parallel_config.worker_cls
