@@ -6,8 +6,6 @@ import logging
 import os
 import sys
 
-import pytest
-
 import vllm_metal as vm
 
 
@@ -35,7 +33,7 @@ def test_apply_macos_defaults_noop_on_non_macos(monkeypatch) -> None:
     assert "VLLM_WORKER_MULTIPROC_METHOD" not in os.environ
 
 
-def test_apply_mlx_buffer_defaults_sets_both_limits(monkeypatch) -> None:
+def test_apply_mlx_buffer_defaults_sets_ops_limit_only(monkeypatch) -> None:
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.delenv("MLX_MAX_OPS_PER_BUFFER", raising=False)
     monkeypatch.delenv("MLX_MAX_MB_PER_BUFFER", raising=False)
@@ -43,7 +41,7 @@ def test_apply_mlx_buffer_defaults_sets_both_limits(monkeypatch) -> None:
     vm._apply_mlx_buffer_defaults()
 
     assert os.environ["MLX_MAX_OPS_PER_BUFFER"] == "2000"
-    assert os.environ["MLX_MAX_MB_PER_BUFFER"] == "2000"
+    assert "MLX_MAX_MB_PER_BUFFER" not in os.environ
 
 
 def test_apply_mlx_buffer_defaults_respects_user_values(monkeypatch) -> None:
@@ -57,26 +55,17 @@ def test_apply_mlx_buffer_defaults_respects_user_values(monkeypatch) -> None:
     assert os.environ["MLX_MAX_MB_PER_BUFFER"] == "128"
 
 
-@pytest.mark.parametrize(
-    ("kept", "defaulted"),
-    [
-        ("MLX_MAX_OPS_PER_BUFFER", "MLX_MAX_MB_PER_BUFFER"),
-        ("MLX_MAX_MB_PER_BUFFER", "MLX_MAX_OPS_PER_BUFFER"),
-    ],
-)
-def test_apply_mlx_buffer_defaults_defaults_each_var_independently(
-    monkeypatch, kept: str, defaulted: str
+def test_apply_mlx_buffer_defaults_preserves_user_mb_limit(
+    monkeypatch,
 ) -> None:
-    # The two limits are independent split thresholds: a user tuning one
-    # keeps it, and the other still gets the plugin default.
     monkeypatch.setattr(sys, "platform", "darwin")
-    monkeypatch.setenv(kept, "50")
-    monkeypatch.delenv(defaulted, raising=False)
+    monkeypatch.delenv("MLX_MAX_OPS_PER_BUFFER", raising=False)
+    monkeypatch.setenv("MLX_MAX_MB_PER_BUFFER", "128")
 
     vm._apply_mlx_buffer_defaults()
 
-    assert os.environ[kept] == "50"
-    assert os.environ[defaulted] == "2000"
+    assert os.environ["MLX_MAX_OPS_PER_BUFFER"] == "2000"
+    assert os.environ["MLX_MAX_MB_PER_BUFFER"] == "128"
 
 
 def test_apply_mlx_buffer_defaults_noop_on_non_macos(monkeypatch) -> None:

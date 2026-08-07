@@ -19,13 +19,13 @@
 
 ## MLX Command-Buffer Defaults
 
-On macOS the plugin defaults `MLX_MAX_OPS_PER_BUFFER` and
-`MLX_MAX_MB_PER_BUFFER` to `2000` via `setdefault`, so a value you export
-yourself always wins; the two limits default independently, so setting
-one keeps the plugin default for the other. MLX's own defaults are sized for small generate
-loops; a vLLM decode step on a large MoE model builds thousands of lazy
-ops per step, and the resulting per-buffer commit overhead slows the step
-submit. `2000` sits on the measured plateau. Outputs are unaffected.
+On macOS the plugin defaults `MLX_MAX_OPS_PER_BUFFER` to `2000` via
+`setdefault`, so a value you export yourself always wins. MLX's own default is
+sized for small generate loops; a vLLM decode step on a large MoE model builds
+thousands of lazy ops per step, and the resulting per-buffer commit overhead
+slows the step submit. `2000` sits on the measured plateau. The plugin does not
+default `MLX_MAX_MB_PER_BUFFER`; large global MB limits can inflate startup
+profile memory and reduce the KV budget. Outputs are unaffected.
 
 ## Multimodal Serve Modes
 

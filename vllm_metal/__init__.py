@@ -60,13 +60,12 @@ def _apply_macos_defaults() -> None:
     )
 
 
-# MLX splits each lazy evaluation into command buffers after this many ops /
-# this much memory; its defaults suit small generate loops, while a vLLM
-# decode step builds thousands of lazy ops per submit. 2000 sits on the
-# measured plateau, and ``setdefault`` keeps user values authoritative.
+# MLX splits each lazy evaluation into command buffers after this many ops;
+# its defaults suit small generate loops, while a vLLM decode step builds
+# thousands of lazy ops per submit. 2000 sits on the measured plateau, and
+# ``setdefault`` keeps user values authoritative.
 _MLX_BUFFER_ENV_DEFAULTS = {
     "MLX_MAX_OPS_PER_BUFFER": "2000",
-    "MLX_MAX_MB_PER_BUFFER": "2000",
 }
 
 
