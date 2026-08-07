@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import math
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import mlx.core as mx
 import numpy as np
@@ -236,17 +235,17 @@ class TestApplyGrammarBitmaskPaged:
         bitmask = np.vstack(
             [
                 _make_single_token_bitmask(allowed_decode),
+                _make_single_token_bitmask(30),
                 _make_single_token_bitmask(allowed_prefill),
             ]
         )
-        grammar = _make_grammar_output(["d0", "p0"], bitmask)
+        grammar = _make_grammar_output(["d0", "absent", "p0"], bitmask)
 
         result = _to_numpy(
             _applier.apply_paged(
                 sched, grammar, decode_reqs, prefill_reqs, cu, 1, logits
             )
         )
-
         # Decode row 0 (d0)
         assert np.isfinite(result[0, 0, allowed_decode])
         assert result[0, 0, (allowed_decode + 1) % VOCAB_SIZE] == float("-inf")
@@ -498,16 +497,17 @@ class TestApplyGrammarBitmaskPaged:
 
         assert result.dtype == mx.float16
 
-    def test_raises_if_xgrammar_missing(self) -> None:
+    def test_raises_if_xgrammar_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
         logits = _uniform_logits_3d(1)
         decode_reqs = [_make_decode_req("r0")]
         cu = _build_cu_seqlens(num_decode=1, prefill_lens=[])
         sched = _make_scheduler_output(["r0"])
         grammar = _make_grammar_output(["r0"], _make_single_token_bitmask(0))
 
-        with patch.object(so, "xgr", None):
-            with pytest.raises(RuntimeError, match="xgrammar is required"):
-                _applier.apply_paged(sched, grammar, decode_reqs, [], cu, 1, logits)
+        monkeypatch.setattr(so, "xgr", None)
+
+        with pytest.raises(RuntimeError, match="xgrammar is required"):
+            _applier.apply_paged(sched, grammar, decode_reqs, [], cu, 1, logits)
 
     def test_rejects_2d_logits(self) -> None:
         """The paged helper must reject 2D logits with a clear assertion."""

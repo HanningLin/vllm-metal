@@ -250,20 +250,10 @@ class MetalStructuredOutputApplier:
         )  # (n_constrained, vocab)
         rows_torch = torch.from_numpy(rows_np)
 
-        # Apply per constrained row. xgrammar's indices= parameter selects rows
-        # from a full-batch bitmask — it does not support a sub-sampled bitmask
-        # paired with non-contiguous logit indices, so we apply row-by-row here.
-        # TODO: batch via indices= once xgrammar supports non-contiguous bitmask selection.
-        for i, (_, bitmask_row) in enumerate(constrained):
-            row_bitmask = torch.from_numpy(
-                grammar_bitmask[bitmask_row : bitmask_row + 1]
-            )
-            # Explicit device=cpu: xgrammar has no Metal/MPS kernel.
-            # vocab_size is intentionally omitted; xgrammar auto-detects it as
-            # min(logits_width, bitmask_words * 32).  Phantom slots in the last
-            # bitmask word (real_vocab % 32 != 0) get -inf, but the downstream
-            # sampler clips to the real vocabulary so they are never sampled.
-            xgr.apply_token_bitmask_inplace(rows_torch[i : i + 1], row_bitmask)
+        bitmask_rows = [bitmask_row for _, bitmask_row in constrained]
+        rows_bitmask = torch.from_numpy(grammar_bitmask[bitmask_rows])
+        # Both tensors are compact CPU batches with matching row order.
+        xgr.apply_token_bitmask_inplace(rows_torch, rows_bitmask)
 
         # rows_torch is CPU float32 (from torch.from_numpy), so torch_to_mlx goes
         # through numpy — all xgrammar mutations are captured before the copy.
