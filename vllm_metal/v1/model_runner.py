@@ -274,6 +274,11 @@ class _PagedForwardState(NamedTuple):
     # ``_sample_paged_batch`` stashes each onto ``RequestState``.
     mm_prefill_deltas: dict[str, int]
     pooling_hidden_states: mx.array | None = None
+    # Every prefill row is an intermediate chunk and no decode rows exist:
+    # the step samples nothing, regardless of whether the projection-free
+    # forward was available (skip-sampling is decoupled from skip-projection
+    # so unsupported models cannot advance seeded RNG on a discarded token).
+    intermediate_only: bool = False
 
 
 class MetalModelRunner:
@@ -393,6 +398,10 @@ class MetalModelRunner:
         # model, not only the YOCO ones that install a real mapping.
         self._yoco_cache_mapping: tuple[int, dict[int, int]] | None = None
 
+        # Whether the adapter can run projection-free intermediate forwards
+        # for the loaded model; resolved once in load_model().
+        self._intermediate_forward_supported = False
+
     @property
     def is_mla(self) -> bool:
         """Whether the model uses Multi-head Latent Attention (MLA).
@@ -504,6 +513,11 @@ class MetalModelRunner:
         # cache profiling materialize weights. No-op on the single-stage path.
         if self.pp is not None:
             self.apply_pipeline_split(self.pp)
+        # Resolve the intermediate-forward capability once; unsupported
+        # models keep the full-logits forward on every step.
+        self._intermediate_forward_supported = (
+            self._model_adapter.supports_intermediate_forward(self._forward_model)
+        )
         text_config = getattr(self.model_config.hf_config, "get_text_config", None)
         max_position_embeddings = None
         if callable(text_config):
@@ -1135,6 +1149,8 @@ class MetalModelRunner:
         logits: mx.array | None = None
         target_hidden_states: mx.array | None = None
         pooling_hidden_states: mx.array | None = None
+        intermediate_hidden: mx.array | None = None
+        intermediate_only = False
         mm_prefill_deltas: dict[str, int] = {}
         # Lazy send op for the non-last pipeline stage (None otherwise).
         pp_send_handle: mx.array | None = None
@@ -1238,14 +1254,35 @@ class MetalModelRunner:
                     pp_send_handle = pipeline_send(stage_output, self.pp)
                 target_hidden_states = None
             else:
-                target_output = self._target_forward(
-                    input_ids,
-                    cache=offset_caches,
-                    collect_hidden_states=collect_target_hidden_states,
+                # Intermediate-only prefill steps sample nothing: no chunk of
+                # theirs contributes a token, so the lm_head projection over
+                # the whole chunk (and the sampling sync) is pure waste. The
+                # adapter runs the model without the projection — the KV and
+                # GDN cache writes are the step's real output. Any installed
+                # drafter is excluded outright: propose() runs unconditional
+                # per-step bookkeeping (finished-id pruning, pending-draft
+                # resolution) that the no-logits short-circuit would skip.
+                intermediate_only = (
+                    not decode_reqs
+                    and bool(prefill_reqs)
+                    and all(pr.prompt_len is None for pr in prefill_reqs)
+                    and self._drafter is None
                 )
-                logits = target_output.logits
-                target_hidden_states = target_output.hidden_states
-                del target_output
+                if intermediate_only and self._intermediate_forward_supported:
+                    intermediate_hidden = self._model_adapter.intermediate_forward(
+                        self._forward_model, input_ids, cache=offset_caches
+                    ).hidden_states
+                    logits = None
+                    target_hidden_states = None
+                else:
+                    target_output = self._target_forward(
+                        input_ids,
+                        cache=offset_caches,
+                        collect_hidden_states=collect_target_hidden_states,
+                    )
+                    logits = target_output.logits
+                    target_hidden_states = target_output.hidden_states
+                    del target_output
         finally:
             clear_context()
 
@@ -1253,6 +1290,10 @@ class MetalModelRunner:
         if has_pooling_work:
             assert pooling_hidden_states is not None
             self._submit_paged_forward_outputs(pooling_hidden_states)
+        elif intermediate_hidden is not None:
+            # Intermediate-only prefill: the KV/GDN cache writes are the real
+            # output; the hidden states force them through the lazy graph.
+            self._submit_paged_forward_outputs(intermediate_hidden)
         elif pp_send_handle is not None:
             # Non-last pipeline stage: no logits, just push the hidden state to
             # the next stage, plus any runtime-owned forward side effects.
@@ -1285,6 +1326,7 @@ class MetalModelRunner:
             decode_segments=decode_segments,
             num_decode_tokens=num_decode_tokens,
             mm_prefill_deltas=mm_prefill_deltas,
+            intermediate_only=intermediate_only,
         )
 
     def _evaluate_pipeline_gate(
@@ -1401,7 +1443,24 @@ class MetalModelRunner:
             )
             return batch, scheduler_output
 
-        assert logits is not None
+        if paged_state.intermediate_only:
+            # Intermediate-only prefill step: nothing to sample — outputs were
+            # pre-filled empty, and skipping the sample applies even when the
+            # full forward ran (unsupported adapter), so seeded RNG never
+            # advances on a discarded token.
+            if decode_reqs or any(
+                entry.result_mode != "intermediate"
+                for entry in batch.paged_prefill_entries
+            ):
+                raise RuntimeError(
+                    "Intermediate-only step has rows that must sample — "
+                    "routing desynced."
+                )
+            for pr in prefill_reqs:
+                self._paged_request_seq_lens[pr.req_id] = pr.start_pos + len(
+                    pr.token_ids
+                )
+            return batch, scheduler_output
 
         # ---- wait for MLX forward to complete ----
         # Only force logits here when something before sampling consumes them

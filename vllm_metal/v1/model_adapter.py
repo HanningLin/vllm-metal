@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 import mlx.core as mx
 from vllm.logger import init_logger
 
+from vllm_metal.v1.pooling import sequence_model
+
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
 
@@ -25,6 +27,13 @@ class TargetModelForwardOutput:
 
     logits: mx.array
     hidden_states: mx.array | None = None
+
+
+@dataclass(frozen=True)
+class IntermediateForwardOutput:
+    """Projection-free forward output for a no-sample intermediate step."""
+
+    hidden_states: mx.array
 
 
 class MultimodalEncodeResult(Protocol):
@@ -129,6 +138,18 @@ class ModelAdapter(Protocol):
 
     def text_model(self, model: Any) -> Any:
         """Return the callable model used for text-only execution."""
+
+    def supports_intermediate_forward(self, model: Any) -> bool:
+        """Whether :meth:`intermediate_forward` can run *model*."""
+
+    def intermediate_forward(
+        self,
+        model: Any,
+        input_ids: mx.array,
+        *,
+        cache: Any | None = None,
+    ) -> IntermediateForwardOutput:
+        """Run *model* without the output projection (cache writes only)."""
 
     def target_forward(
         self,
@@ -350,6 +371,41 @@ validate_paged_attention_support` only when ``kv_heads_per_layer`` has
         if hasattr(model, "language_model"):
             return model.language_model
         return model
+
+    def supports_intermediate_forward(self, model: Any) -> bool:
+        """Whether :meth:`intermediate_forward` can run *model*.
+
+        A capability probe for the runner to resolve once at load time; the
+        full-logits forward is the working default whenever it is ``False``.
+        """
+        return self._transformer_body(model) is not None
+
+    def intermediate_forward(
+        self,
+        model: Any,
+        input_ids: mx.array,
+        *,
+        cache: Any | None = None,
+    ) -> IntermediateForwardOutput:
+        """Run *model*'s transformer body without the output projection.
+
+        For a prefill chunk that samples nothing, the KV/GDN cache writes
+        are the real output; skipping the vocab projection over the chunk
+        is pure dead-compute elimination.
+        """
+        body = self._transformer_body(model)
+        if body is None:
+            raise ValueError(
+                f"{type(model).__name__} has no resolvable transformer body; "
+                "callers must gate on supports_intermediate_forward()."
+            )
+        return IntermediateForwardOutput(hidden_states=body(input_ids, cache=cache))
+
+    def _transformer_body(self, model: Any) -> Any | None:
+        # Reuses the pooling module's backbone helper — the one established
+        # definition of "the MLX transformer body" — on the text sub-model
+        # (conditional-generation wrappers nest it under ``language_model``).
+        return sequence_model(self.text_model(model))
 
     def target_forward(
         self,
