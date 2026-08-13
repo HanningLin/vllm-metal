@@ -579,6 +579,8 @@ class MetalModelRunner:
             dtype=self.kv_cache_dtype or mx.float16,
             max_position_embeddings=max_position_embeddings,
         )
+        if self._is_pooling:
+            self._model_lifecycle.install_pooling_backend()
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self._lora.add_adapter(lora_request)

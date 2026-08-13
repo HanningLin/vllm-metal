@@ -138,9 +138,9 @@ class ModelLifecycle:
             loaded_model.model_args,
             request,
         )
-        self._install_pooling_backend()
 
-    def _install_pooling_backend(self) -> None:
+    def install_pooling_backend(self) -> None:
+        """Install the pooling backend after load-time model mutation."""
         runner = self._runner
         if not runner._is_pooling:
             runner._pooling_backend = None

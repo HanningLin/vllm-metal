@@ -460,15 +460,28 @@ class TestMetalPoolingCapabilities:
 
         assert gen_runner.supported_worker_tasks() == ("generate",)
 
-    def test_lifecycle_load_installs_pooling_backend(self) -> None:
+    def test_load_model_installs_pooling_backend_after_lora_setup(self) -> None:
+        events: list[str] = []
         runner = _make_runner()
         runner._pooling_backend = None
         lifecycle = ModelLifecycle(runner, runner._model_adapter)
+        runner._model_lifecycle = lifecycle
+        runner.metal_config = SimpleNamespace(use_paged_attention=True)
+        runner.scheduler_config = SimpleNamespace(
+            max_num_seqs=1,
+            max_num_batched_tokens=1,
+        )
+        runner.kv_cache_dtype = None
         loaded = LoadedGenerationModel(
             model=runner.model,
             tokenizer=runner.tokenizer,
             model_args={},
         )
+
+        def setup_lora(**kwargs) -> None:
+            del kwargs
+            events.append("lora")
+            assert runner._pooling_backend is None
 
         with (
             patch.object(lifecycle, "_load_generation", return_value=loaded),
@@ -476,8 +489,10 @@ class TestMetalPoolingCapabilities:
             patch.object(lifecycle, "resolve_model_dims"),
             patch.object(lifecycle, "_install_runtime_extensions"),
         ):
-            lifecycle.load()
+            runner._lora = SimpleNamespace(setup=setup_lora)
+            runner.load_model()
 
+        assert events == ["lora"]
         assert runner._pooling_backend is not None
         assert runner._pooling_backend.supported_tasks() == ("embed",)
 
