@@ -25,13 +25,23 @@ class Qwen3RerankerPooler:
         self.config = PoolingConfigView(model_config)
         self.tokenizer = tokenizer
 
-    def supported_tasks(self) -> tuple[PoolingTask, ...]:
-        if not self._supported():
-            return ()
-        return ("classify",)
+    def is_supported(self) -> bool:
+        if self.config.has_multimodal_config:
+            return False
+        if self.config.task not in CLASSIFY_POOLER_TASKS:
+            return False
+        if self.config.unsupported_sequence_pooling_type is not None:
+            return False
+        if self.config.chunked_processing_enabled:
+            return False
+        return (
+            self.config.is_qwen3_reranker
+            and self._classifier_logits_fn() is not None
+            and self._classifier_token_ids() is not None
+        )
 
     def validate_params(self, pooling_params: PoolingParams) -> None:
-        if not self._supported():
+        if not self.is_supported():
             raise NotImplementedError(
                 "Metal classify pooling requires original Qwen3 reranker "
                 "classifier_from_token=['no', 'yes'] and either lm_head for "
@@ -95,21 +105,6 @@ class Qwen3RerankerPooler:
 
         tensor = mlx_to_torch(score.reshape((1,)), device="cpu")
         return tensor.detach().clone()
-
-    def _supported(self) -> bool:
-        if self.config.has_multimodal_config:
-            return False
-        if self.config.task not in CLASSIFY_POOLER_TASKS:
-            return False
-        if self.config.unsupported_sequence_pooling_type is not None:
-            return False
-        if self.config.chunked_processing_enabled:
-            return False
-        return (
-            self.config.is_qwen3_reranker
-            and self._classifier_logits_fn() is not None
-            and self._classifier_token_ids() is not None
-        )
 
     def _sequence_model(self) -> Any | None:
         inner = getattr(self.model, "model", None)

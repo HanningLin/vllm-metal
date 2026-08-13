@@ -96,14 +96,14 @@ from vllm_metal.v1.model_adapter import (
     TargetModelForwardOutput,
 )
 from vllm_metal.v1.model_lifecycle import ModelLifecycle
-from vllm_metal.v1.pooling.backends.decoder.batching import (
-    has_paged_pooling_work,
-    pool_paged_prefill_batch,
-)
 from vllm_metal.v1.pooling.backends.decoder.runtime import (
     build_decoder_pooling_backend,
 )
-from vllm_metal.v1.pooling.contract import DecoderPoolingBackend
+from vllm_metal.v1.pooling.contract import (
+    DecoderPoolingBackend,
+    DecoderPoolingBatch,
+    DecoderPoolingSpan,
+)
 from vllm_metal.v1.pooling.validation import validate_pooling_request
 from vllm_metal.v1.proposer import (
     Gemma4MTPProposer,
@@ -257,6 +257,48 @@ class _ExecutionBatch:
     def has_paged_work(self) -> bool:
         """Return whether this step has any paged execution work."""
         return bool(self.paged_prefill_entries or self.paged_decode_reqs)
+
+    def has_paged_pooling_work(
+        self,
+        prefill_reqs: list[PrefillRequest],
+        decode_reqs: list[tuple[str, RequestState]],
+    ) -> bool:
+        """Return whether this step has pure paged pooling work."""
+        pooling_prefills = [pr for pr in prefill_reqs if pr.pooling_params is not None]
+        has_pooling_work = bool(pooling_prefills)
+        if has_pooling_work and (
+            len(pooling_prefills) != len(prefill_reqs) or decode_reqs
+        ):
+            raise NotImplementedError(
+                "Metal pooling batches cannot mix pooling requests with "
+                "generation prefill/decode requests."
+            )
+        return has_pooling_work
+
+    def decoder_pooling_batch(
+        self,
+        cu_seqlens: list[int],
+        num_decode_segments: int,
+    ) -> DecoderPoolingBatch:
+        """Build decoder pooling spans for this step."""
+        spans: list[DecoderPoolingSpan] = []
+        for index, entry in enumerate(self.paged_prefill_entries):
+            pooling_params = entry.prefill.pooling_params
+            if pooling_params is None:
+                raise RuntimeError(
+                    "Paged pooling batch contained a non-pooling prefill request."
+                )
+            start = cu_seqlens[num_decode_segments + index]
+            end = cu_seqlens[num_decode_segments + index + 1]
+            spans.append(
+                DecoderPoolingSpan(
+                    start_row=start,
+                    num_tokens=end - start,
+                    is_complete=entry.result_mode != "intermediate",
+                    pooling_params=pooling_params,
+                )
+            )
+        return DecoderPoolingBatch(tuple(spans))
 
 
 class _PagedForwardState(NamedTuple):
@@ -1081,7 +1123,7 @@ class MetalModelRunner:
             self._paged_request_seq_lens,
         )
         num_decode_tokens = sum(segment.num_query_tokens for segment in decode_segments)
-        has_pooling_work = has_paged_pooling_work(prefill_reqs, decode_reqs)
+        has_pooling_work = batch.has_paged_pooling_work(prefill_reqs, decode_reqs)
 
         # prompt_len=None marks an intermediate prefill chunk; only final
         # prefill rows can seed the next Gemma4 MTP draft step. Pooling batches
@@ -1437,16 +1479,18 @@ class MetalModelRunner:
 
         if pooling_hidden_states is not None:
             assert self._pooling_backend is not None
-            pooling_result = pool_paged_prefill_batch(
-                self._pooling_backend,
+            mx.eval(pooling_hidden_states)
+            pooling_batch = batch.decoder_pooling_batch(
+                cu_seqlens,
+                num_decode_segments,
+            )
+            pooler_outputs = self._pooling_backend.pool_packed(
                 pooling_hidden_states,
-                batch.paged_prefill_entries,
-                cu_seqlens=cu_seqlens,
-                num_decode_segments=num_decode_segments,
+                pooling_batch,
             )
             for entry, pooler_output in zip(
                 batch.paged_prefill_entries,
-                pooling_result.outputs,
+                pooler_outputs,
                 strict=True,
             ):
                 batch.set_output(entry.output_idx, [], None, pooler_output)

@@ -17,9 +17,7 @@ from vllm_metal.v1.pooling.contract import (
     DecoderPooler,
     DecoderPoolingBatch,
     DecoderPoolingSpan,
-    PoolingBatchResult,
     PoolingCapabilities,
-    PoolingExecutionKind,
 )
 from vllm_metal.v1.pooling.validation import (
     EMBED_POOLER_TASKS,
@@ -51,13 +49,24 @@ class LastTokenEmbeddingPooler:
         self.model_view = model_view
         self.config = config
 
-    def supported_tasks(self) -> tuple[PoolingTask, ...]:
-        if not self._supported():
-            return ()
-        return ("embed",)
+    def is_supported(self) -> bool:
+        if self.config.has_multimodal_config:
+            return False
+        if self.config.task not in EMBED_POOLER_TASKS:
+            return False
+        if self.config.unsupported_sequence_pooling_type is not None:
+            return False
+        if not self.config.embed_activation_allowed:
+            return False
+        if self.config.chunked_processing_enabled:
+            return False
+        return (
+            self.model_view.transformer_body() is not None
+            and self.config.is_decoder_embedding
+        )
 
     def validate_params(self, pooling_params: PoolingParams) -> None:
-        if not self._supported():
+        if not self.is_supported():
             raise NotImplementedError(
                 "Metal embed pooling requires a decoder-style checkpoint; got "
                 f"model={self.config.label}."
@@ -94,37 +103,13 @@ class LastTokenEmbeddingPooler:
         norm = mx.maximum(norm, mx.array(1e-12, dtype=mx.float32))
         return mx.contiguous(vector / norm)
 
-    def _supported(self) -> bool:
-        if self.config.has_multimodal_config:
-            return False
-        if self.config.task not in EMBED_POOLER_TASKS:
-            return False
-        if self.config.unsupported_sequence_pooling_type is not None:
-            return False
-        if not self.config.embed_activation_allowed:
-            return False
-        if self.config.chunked_processing_enabled:
-            return False
-        return (
-            self.model_view.transformer_body() is not None
-            and self.config.is_decoder_embedding
-        )
-
 
 class MetalDecoderPoolingBackend:
     """Decoder pooling backend for current Metal text pooling behavior."""
 
-    capabilities = PoolingCapabilities(
-        execution_kind=PoolingExecutionKind.DECODER,
-        requires_paged_attention=True,
-        uses_kv_cache=True,
-        supports_chunked_requests=True,
-    )
+    capabilities = PoolingCapabilities(requires_paged_attention=True)
 
     def __init__(self, model: Any, model_config: Any, tokenizer: Any) -> None:
-        self.model = model
-        self.model_config = model_config
-        self.tokenizer = tokenizer
         self.config = PoolingConfigView(model_config)
         self.model_view = DecoderModelView(model)
         self.poolers: tuple[DecoderPooler, ...] = (
@@ -133,10 +118,7 @@ class MetalDecoderPoolingBackend:
         )
 
     def supported_tasks(self) -> tuple[PoolingTask, ...]:
-        tasks: list[PoolingTask] = []
-        for pooler in self.poolers:
-            tasks.extend(pooler.supported_tasks())
-        return tuple(dict.fromkeys(tasks))
+        return tuple(pooler.task for pooler in self.poolers if pooler.is_supported())
 
     def validate_params(self, pooling_params: PoolingParams) -> None:
         task = pooling_params.task or "embed"
@@ -182,14 +164,14 @@ class MetalDecoderPoolingBackend:
         self,
         hidden_states: mx.array,
         batch: DecoderPoolingBatch,
-    ) -> PoolingBatchResult:
+    ) -> tuple[torch.Tensor | None, ...]:
         outputs: list[torch.Tensor | None] = []
         for span in batch.spans:
             if not span.is_complete:
                 outputs.append(None)
                 continue
             outputs.append(self._pool_complete_span(hidden_states, span))
-        return PoolingBatchResult(tuple(outputs))
+        return tuple(outputs)
 
     def _pool_complete_span(
         self,
@@ -198,7 +180,7 @@ class MetalDecoderPoolingBackend:
     ) -> torch.Tensor:
         task = span.pooling_params.task or "embed"
         for pooler in self.poolers:
-            if task in pooler.supported_tasks():
+            if task == pooler.task and pooler.is_supported():
                 return pooler.pool_one(hidden_states, span)
         raise NotImplementedError(
             "Metal pooling supports only text-only task='embed' and the "

@@ -26,41 +26,39 @@ class PoolingConfigView:
 
     @property
     def label(self) -> str:
-        served_model_name = getattr(self.model_config, "served_model_name", None)
+        served_model_name = self.model_config.served_model_name
         if isinstance(served_model_name, (list, tuple)):
             served_model_name = served_model_name[0] if served_model_name else None
-        return str(served_model_name or getattr(self.model_config, "model", "unknown"))
+        return str(served_model_name or self.model_config.model)
 
     @property
     def hf_config(self) -> Any:
-        return getattr(self.model_config, "hf_config", None)
+        return self.model_config.hf_config
 
     @property
     def pooler_config(self) -> Any:
-        return getattr(self.model_config, "pooler_config", None)
+        return self.model_config.pooler_config
 
     @property
     def runner_type(self) -> str | None:
-        runner_type = getattr(self.model_config, "runner_type", None)
+        runner_type = self.model_config.runner_type
         return str(runner_type) if runner_type is not None else None
 
     @property
     def task(self) -> str | None:
-        task = getattr(self.pooler_config, "task", None)
+        task = self.pooler_config.task
         return str(task) if task is not None else None
 
     @property
     def architectures(self) -> tuple[str, ...]:
-        architectures: list[str] = []
-        for source in (self.model_config, self.hf_config):
-            values = getattr(source, "architectures", None)
-            if isinstance(values, (list, tuple)):
-                architectures.extend(str(value) for value in values)
-        return tuple(architectures)
+        values = getattr(self.hf_config, "architectures", None)
+        if not isinstance(values, (list, tuple)):
+            return ()
+        return tuple(str(value) for value in values)
 
     @property
     def has_multimodal_config(self) -> bool:
-        return getattr(self.model_config, "multimodal_config", None) is not None
+        return self.model_config.multimodal_config is not None
 
     @property
     def unsupported_sequence_pooling_type(self) -> str | None:
@@ -71,10 +69,8 @@ class PoolingConfigView:
 
     @property
     def sequence_pooling_types(self) -> tuple[str | None, str | None]:
-        if self.pooler_config is None:
-            return (None, None)
-        seq_pooling_type = getattr(self.pooler_config, "seq_pooling_type", None)
-        pooling_type = getattr(self.pooler_config, "pooling_type", None)
+        seq_pooling_type = self.pooler_config.seq_pooling_type
+        pooling_type = self.pooler_config.pooling_type
         return (
             str(seq_pooling_type) if seq_pooling_type is not None else None,
             str(pooling_type) if pooling_type is not None else None,
@@ -82,13 +78,11 @@ class PoolingConfigView:
 
     @property
     def embed_activation_allowed(self) -> bool:
-        if self.pooler_config is None:
-            return True
-        return getattr(self.pooler_config, "use_activation", None) is not False
+        return self.pooler_config.use_activation is not False
 
     @property
     def chunked_processing_enabled(self) -> bool:
-        return bool(getattr(self.pooler_config, "enable_chunked_processing", False))
+        return bool(self.pooler_config.enable_chunked_processing)
 
     @property
     def classifier_tokens(self) -> tuple[str, str] | None:
@@ -116,21 +110,21 @@ class PoolingConfigView:
 
     @property
     def logit_mean(self) -> float | None:
-        value = getattr(self.pooler_config, "logit_mean", None)
+        value = self.pooler_config.logit_mean
         return float(value) if value is not None else None
 
     @property
     def logit_sigma(self) -> float | None:
-        value = getattr(self.pooler_config, "logit_sigma", None)
+        value = self.pooler_config.logit_sigma
         return float(value) if value is not None else None
 
     @property
     def use_activation_by_default(self) -> bool:
-        return getattr(self.pooler_config, "use_activation", None) is not False
+        return self.pooler_config.use_activation is not False
 
     @property
     def has_embedding_dimension_override(self) -> bool:
-        return getattr(self.pooler_config, "dimensions", None) is not None
+        return self.pooler_config.dimensions is not None
 
     def reject_unsupported_pooler_config(self) -> None:
         if self.task not in SUPPORTED_POOLER_TASKS:
@@ -172,51 +166,6 @@ class PoolingConfigView:
             return "embedding-dimension truncation"
         return None
 
-    def validate_params(self, pooling_params: PoolingParams) -> None:
-        if self.runner_type != "pooling":
-            raise NotImplementedError(
-                "Metal pooling requires runner_type='pooling'; got "
-                f"{self.runner_type!r} for model={self.label}."
-            )
-        self.reject_unsupported_pooler_config()
-
-        task = pooling_params.task
-        if task in EMBED_POOLER_TASKS:
-            if not self.is_decoder_embedding:
-                raise NotImplementedError(
-                    "Metal embed pooling requires a decoder-style checkpoint; got "
-                    f"architectures={self.architectures!r} for model={self.label}."
-                )
-        elif task == "classify":
-            if not self.is_qwen3_reranker:
-                raise NotImplementedError(
-                    "Metal classify pooling currently supports only original Qwen3 "
-                    "reranker checkpoints converted with "
-                    "Qwen3ForSequenceClassification and classifier_from_token="
-                    "['no', 'yes']; "
-                    f"architectures={self.architectures!r} for model={self.label}."
-                )
-        else:
-            raise NotImplementedError(
-                "Metal pooling supports only text-only task='embed' and the "
-                "Qwen3 reranker task='classify' for now; "
-                f"got task={task!r} for model={self.label}."
-            )
-
-        unsupported_option = self.unsupported_pooling_option(pooling_params)
-        if unsupported_option is not None:
-            raise NotImplementedError(
-                f"Metal pooling does not support {unsupported_option} "
-                f"for model={self.label}."
-            )
-
-
-def validate_pooling_params(
-    pooling_params: PoolingParams,
-    model_config: Any,
-) -> None:
-    PoolingConfigView(model_config).validate_params(pooling_params)
-
 
 def validate_pooling_request(
     new_req: NewRequestData,
@@ -231,7 +180,19 @@ def validate_pooling_request(
     if backend is None:
         raise RuntimeError("Metal pooling backend is not installed.")
 
-    PoolingConfigView(model_config).validate_params(pooling_params)
+    config = PoolingConfigView(model_config)
+    if config.runner_type != "pooling":
+        raise NotImplementedError(
+            "Metal pooling requires runner_type='pooling'; got "
+            f"{config.runner_type!r} for model={config.label}."
+        )
+    config.reject_unsupported_pooler_config()
+    unsupported_option = config.unsupported_pooling_option(pooling_params)
+    if unsupported_option is not None:
+        raise NotImplementedError(
+            f"Metal pooling does not support {unsupported_option} "
+            f"for model={config.label}."
+        )
     backend.validate_params(pooling_params)
     if new_req.mm_features:
         raise NotImplementedError(

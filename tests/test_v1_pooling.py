@@ -136,6 +136,11 @@ def _pooler_config(**overrides):
         "pooling_type": None,
         "seq_pooling_type": "LAST",
         "tok_pooling_type": "ALL",
+        "enable_chunked_processing": False,
+        "logit_mean": None,
+        "logit_sigma": None,
+        "use_activation": None,
+        "dimensions": None,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
