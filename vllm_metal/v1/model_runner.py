@@ -255,23 +255,6 @@ class _ExecutionBatch:
         """Return whether this step has any paged execution work."""
         return bool(self.paged_prefill_entries or self.paged_decode_reqs)
 
-    def has_paged_pooling_work(
-        self,
-        prefill_reqs: list[PrefillRequest],
-        decode_reqs: list[tuple[str, RequestState]],
-    ) -> bool:
-        """Return whether this step has pure paged pooling work."""
-        pooling_prefills = [pr for pr in prefill_reqs if pr.pooling_params is not None]
-        has_pooling_work = bool(pooling_prefills)
-        if has_pooling_work and (
-            len(pooling_prefills) != len(prefill_reqs) or decode_reqs
-        ):
-            raise NotImplementedError(
-                "Metal pooling batches cannot mix pooling requests with "
-                "generation prefill/decode requests."
-            )
-        return has_pooling_work
-
     def decoder_pooling_batch(
         self,
         cu_seqlens: list[int],
@@ -550,6 +533,22 @@ class MetalModelRunner:
                 return ()
             return backend.supported_tasks()
         return ("generate",)
+
+    def _has_paged_pooling_work(
+        self,
+        prefill_reqs: list[PrefillRequest],
+        decode_reqs: list[tuple[str, RequestState]],
+    ) -> bool:
+        pooling_prefills = [pr for pr in prefill_reqs if pr.pooling_params is not None]
+        has_pooling_work = bool(pooling_prefills)
+        if has_pooling_work and (
+            len(pooling_prefills) != len(prefill_reqs) or decode_reqs
+        ):
+            raise NotImplementedError(
+                "Metal pooling batches cannot mix pooling requests with "
+                "generation prefill/decode requests."
+            )
+        return has_pooling_work
 
     def load_model(self) -> None:
         """Load the configured model and derive runtime metadata."""
@@ -1120,7 +1119,7 @@ class MetalModelRunner:
             self._paged_request_seq_lens,
         )
         num_decode_tokens = sum(segment.num_query_tokens for segment in decode_segments)
-        has_pooling_work = batch.has_paged_pooling_work(prefill_reqs, decode_reqs)
+        has_pooling_work = self._has_paged_pooling_work(prefill_reqs, decode_reqs)
 
         # prompt_len=None marks an intermediate prefill chunk; only final
         # prefill rows can seed the next Gemma4 MTP draft step. Pooling batches
