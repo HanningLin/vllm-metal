@@ -18,7 +18,6 @@ from vllm_metal.v1.pooling.contract import (
 
 LAST_POOLING = (None, "LAST")
 EMBED_CONFIG_TASKS: tuple[PoolingTask | None, ...] = (None, EMBED_TASK)
-CLASSIFY_CONFIG_TASKS: tuple[PoolingTask | None, ...] = (None, CLASSIFY_TASK)
 SUPPORTED_POOLER_TASKS: tuple[PoolingTask | None, ...] = (
     None,
     EMBED_TASK,
@@ -62,17 +61,6 @@ class PoolingConfigView:
         if not isinstance(values, (list, tuple)):
             return ()
         return tuple(str(value) for value in values)
-
-    @property
-    def is_original_qwen3_reranker(self) -> bool:
-        return getattr(self.hf_config, "is_original_qwen3_reranker", False) is True
-
-    @property
-    def qwen3_classifier_tokens(self) -> tuple[str, str] | None:
-        tokens = getattr(self.hf_config, "classifier_from_token", None)
-        if not isinstance(tokens, (list, tuple)) or len(tokens) != 2:
-            return None
-        return (str(tokens[0]), str(tokens[1]))
 
     @property
     def has_multimodal_config(self) -> bool:
@@ -121,15 +109,6 @@ class PoolingConfigView:
             and self.task in EMBED_CONFIG_TASKS
             and self.uses_last_pooling
             and self.embed_activation_allowed
-            and not self.chunked_processing_enabled
-        )
-
-    @property
-    def supports_qwen3_reranker_config(self) -> bool:
-        return (
-            self.is_text_only
-            and self.task in CLASSIFY_CONFIG_TASKS
-            and self.uses_last_pooling
             and not self.chunked_processing_enabled
         )
 

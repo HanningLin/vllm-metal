@@ -18,7 +18,6 @@ from vllm.tasks import PoolingTask
 from vllm_metal.attention.context import OffsetCache
 from vllm_metal.pytorch_backend.tensor_bridge import mlx_to_torch
 from vllm_metal.v1.pooling.contract import (
-    CLASSIFY_TASK,
     EMBED_TASK,
     DecoderPooler,
     DecoderPoolingBatch,
@@ -198,20 +197,9 @@ class MetalDecoderPoolingBackend:
         return poolers_by_task
 
     def _raise_unsupported_task(self, task: PoolingTask | None) -> NoReturn:
-        if task in (None, EMBED_TASK):
-            raise NotImplementedError(
-                "Metal embed pooling requires a decoder-style checkpoint; got "
-                f"model={self.config.label}."
-            )
-        if task == CLASSIFY_TASK:
-            raise NotImplementedError(
-                "Metal classify pooling requires original Qwen3 reranker "
-                "classifier_from_token=['no', 'yes'] and either lm_head for "
-                "untied checkpoints or embed_tokens.as_linear for tied "
-                "checkpoints."
-            )
+        supported_tasks = ", ".join(repr(value) for value in self.supported_tasks())
+        supported_hint = supported_tasks or "none"
         raise NotImplementedError(
-            "Metal pooling supports only text-only task='embed' and the "
-            "Qwen3 reranker task='classify' for now; "
-            f"got task={task!r} for model={self.config.label}."
+            f"Metal pooling does not support task={task or EMBED_TASK!r} "
+            f"for model={self.config.label}; supported tasks: {supported_hint}."
         )

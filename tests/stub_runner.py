@@ -14,7 +14,9 @@ from vllm_metal.v1.cache_policy import ModelCachePolicy
 from vllm_metal.v1.decode_pipeline import DecodePipeline
 from vllm_metal.v1.lora import MetalLoRARuntime
 from vllm_metal.v1.model_adapter import DefaultModelAdapter
-from vllm_metal.v1.pooling.registry import load_pooling_backend
+from vllm_metal.v1.pooling.backends.decoder.factory import (
+    build_decoder_pooling_backend,
+)
 from vllm_metal.v1.spec_decode import SpeculativeDecodeController
 from vllm_metal.v1.structured_output import MetalStructuredOutputApplier
 
@@ -94,7 +96,7 @@ def make_stub_runner(
         runner._is_pooling = runner.model_config.runner_type == "pooling"
     if "_pooling_backend" not in attrs:
         runner._pooling_backend = (
-            load_pooling_backend(
+            build_decoder_pooling_backend(
                 runner._forward_model,
                 runner.model_config,
                 runner.tokenizer,

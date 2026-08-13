@@ -17,12 +17,44 @@ from vllm_metal.v1.pooling.contract import CLASSIFY_TASK, DecoderPoolingSpan
 from vllm_metal.v1.pooling.validation import PoolingConfigView
 
 QWEN3_RERANKER_TOKENS = ("no", "yes")
+QWEN3_RERANKER_ARCH = "Qwen3ForSequenceClassification"
+QWEN3_RERANKER_TASKS: tuple[PoolingTask | None, ...] = (None, CLASSIFY_TASK)
 
 
 @dataclass(frozen=True, slots=True)
 class Qwen3ClassifierHead:
     token_ids: mx.array
     logits: Callable[[mx.array], mx.array]
+
+
+@dataclass(frozen=True, slots=True)
+class Qwen3RerankerConfigView:
+    config: PoolingConfigView
+
+    @property
+    def classifier_tokens(self) -> tuple[str, str] | None:
+        tokens = getattr(self.config.hf_config, "classifier_from_token", None)
+        if not isinstance(tokens, (list, tuple)) or len(tokens) != 2:
+            return None
+        return (str(tokens[0]), str(tokens[1]))
+
+    @property
+    def is_original_reranker(self) -> bool:
+        return (
+            getattr(self.config.hf_config, "is_original_qwen3_reranker", False) is True
+        )
+
+    @property
+    def is_supported(self) -> bool:
+        return (
+            self.config.is_text_only
+            and self.config.task in QWEN3_RERANKER_TASKS
+            and self.config.uses_last_pooling
+            and not self.config.chunked_processing_enabled
+            and QWEN3_RERANKER_ARCH in self.config.architectures
+            and self.is_original_reranker
+            and self.classifier_tokens == QWEN3_RERANKER_TOKENS
+        )
 
 
 class Qwen3RerankerPooler:
@@ -39,17 +71,13 @@ class Qwen3RerankerPooler:
     ) -> None:
         self.model = model
         self.config = PoolingConfigView(model_config)
+        self.qwen_config = Qwen3RerankerConfigView(self.config)
         self.tokenizer = tokenizer
         self.sequence_model = sequence_model
-        self.classifier_tokens = self.config.qwen3_classifier_tokens
         self.classifier_head = self._classifier_head()
 
     def is_supported(self) -> bool:
-        return (
-            self.config.supports_qwen3_reranker_config
-            and self._is_qwen3_reranker()
-            and self.classifier_head is not None
-        )
+        return self.qwen_config.is_supported and self.classifier_head is not None
 
     def pool_one(
         self,
@@ -100,13 +128,6 @@ class Qwen3RerankerPooler:
 
         tensor = mlx_to_torch(score.reshape((1,)), device="cpu")
         return tensor.detach().clone()
-
-    def _is_qwen3_reranker(self) -> bool:
-        return (
-            "Qwen3ForSequenceClassification" in self.config.architectures
-            and self.config.is_original_qwen3_reranker
-            and self.classifier_tokens == QWEN3_RERANKER_TOKENS
-        )
 
     def _word_embeddings_tied(self) -> bool | None:
         for source in (
@@ -159,7 +180,7 @@ class Qwen3RerankerPooler:
         return None
 
     def _classifier_token_ids(self) -> tuple[int, int] | None:
-        tokens = self.classifier_tokens
+        tokens = self.qwen_config.classifier_tokens
         if tokens is None:
             return None
         token_ids = tuple(self._resolve_token_id(token) for token in tokens)

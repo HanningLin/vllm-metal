@@ -20,6 +20,10 @@ from tests.stub_runner import make_stub_runner  # noqa: E402
 from vllm_metal.attention.runtime.mha import MHAPagedAttentionRuntime  # noqa: E402
 from vllm_metal.multimodal import MultiModalFeatureSpec, PlaceholderRange  # noqa: E402
 from vllm_metal.v1 import model_runner as mr  # noqa: E402
+from vllm_metal.v1.model_lifecycle import (  # noqa: E402
+    LoadedGenerationModel,
+    ModelLifecycle,
+)
 from vllm_metal.v1.pooling.backends.decoder.models.qwen3 import (  # noqa: E402
     Qwen3RerankerPooler,
 )
@@ -27,7 +31,10 @@ from vllm_metal.v1.pooling.backends.decoder.runtime import (  # noqa: E402
     DecoderModelView,
     MetalDecoderPoolingBackend,
 )
-from vllm_metal.v1.pooling.contract import DecoderPoolingSpan  # noqa: E402
+from vllm_metal.v1.pooling.contract import (  # noqa: E402
+    DecoderPoolingSpan,
+    PoolingCapabilities,
+)
 from vllm_metal.v1.pooling.validation import PoolingConfigView  # noqa: E402
 
 
@@ -164,8 +171,12 @@ def _pooling_model_config(**overrides):
         "multimodal_config": None,
         "served_model_name": "stub-pooling-model",
         "model": "stub-pooling-model",
+        "dtype": torch.float16,
         "hf_config": _hf_config(),
+        "is_multimodal_model": False,
         "pooler_config": _pooler_config(),
+        "quantization": None,
+        "trust_remote_code": False,
         "get_head_size": lambda: 128,
     }
     values.update(overrides)
@@ -427,6 +438,21 @@ class TestMetalPoolingCapabilities:
 
         assert runner.supported_worker_tasks() == ()
 
+    def test_supported_worker_tasks_uses_backend_paged_capability(self) -> None:
+        class _NoPagedBackend:
+            capabilities = PoolingCapabilities(requires_paged_attention=False)
+
+            def supported_tasks(self):
+                return ("embed",)
+
+            def validate_params(self, pooling_params):
+                del pooling_params
+
+        runner = _make_runner(paged=False)
+        runner._pooling_backend = _NoPagedBackend()
+
+        assert runner.supported_worker_tasks() == ("embed",)
+
     def test_supported_worker_tasks_preserves_generation(self) -> None:
         gen_runner = make_stub_runner(
             model_config=SimpleNamespace(runner_type="generate")
@@ -434,24 +460,26 @@ class TestMetalPoolingCapabilities:
 
         assert gen_runner.supported_worker_tasks() == ("generate",)
 
-    def test_load_model_installs_pooling_backend_after_lora_setup(self) -> None:
-        events: list[str] = []
+    def test_lifecycle_load_installs_pooling_backend(self) -> None:
         runner = _make_runner()
-        runner._model_lifecycle = SimpleNamespace(
-            load=lambda: events.append("load"),
-            install_pooling_backend=lambda: events.append("pooling"),
+        runner._pooling_backend = None
+        lifecycle = ModelLifecycle(runner, runner._model_adapter)
+        loaded = LoadedGenerationModel(
+            model=runner.model,
+            tokenizer=runner.tokenizer,
+            model_args={},
         )
-        runner._lora = SimpleNamespace(setup=lambda **kwargs: events.append("lora"))
-        runner.metal_config = SimpleNamespace(use_paged_attention=True)
-        runner.scheduler_config = SimpleNamespace(
-            max_num_seqs=1,
-            max_num_batched_tokens=1,
-        )
-        runner.kv_cache_dtype = None
 
-        runner.load_model()
+        with (
+            patch.object(lifecycle, "_load_generation", return_value=loaded),
+            patch.object(lifecycle, "_install_generation_model"),
+            patch.object(lifecycle, "resolve_model_dims"),
+            patch.object(lifecycle, "_install_runtime_extensions"),
+        ):
+            lifecycle.load()
 
-        assert events == ["load", "lora", "pooling"]
+        assert runner._pooling_backend is not None
+        assert runner._pooling_backend.supported_tasks() == ("embed",)
 
     def test_duplicate_supported_pooler_tasks_fail_at_backend_construction(
         self,
@@ -632,7 +660,7 @@ class TestMetalPoolingFailFast:
         )
         req = _new_req("req-0", [1, 2], task="embed")
 
-        with pytest.raises(NotImplementedError, match="decoder-style checkpoint"):
+        with pytest.raises(NotImplementedError, match="task='embed'"):
             runner.execute_model(_scheduler_output(new_reqs=[req]))
 
     def test_pooling_requires_paged_attention(self) -> None:
@@ -665,7 +693,7 @@ class TestMetalPoolingFailFast:
         with (
             patch("vllm_metal.v1.model_runner.prepare_grouped") as prepare,
             patch.object(runner._pooling_backend, "forward_packed") as forward,
-            pytest.raises(NotImplementedError, match="classify pooling requires"),
+            pytest.raises(NotImplementedError, match="task='classify'"),
         ):
             runner.execute_model(_scheduler_output(new_reqs=[req]))
 
