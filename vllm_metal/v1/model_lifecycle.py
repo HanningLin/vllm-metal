@@ -142,9 +142,6 @@ class ModelLifecycle:
     def install_pooling_backend(self) -> None:
         """Install the pooling backend after load-time model mutation."""
         runner = self._runner
-        if not runner._is_pooling:
-            runner._pooling_backend = None
-            return
         runner._pooling_backend = build_decoder_pooling_backend(
             runner._forward_model,
             runner.model_config,
