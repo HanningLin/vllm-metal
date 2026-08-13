@@ -66,11 +66,19 @@ class PoolingConfigView:
         return self.model_config.multimodal_config is not None
 
     @property
+    def is_text_only(self) -> bool:
+        return not self.has_multimodal_config
+
+    @property
     def unsupported_sequence_pooling_type(self) -> str | None:
         for pooling_type in self.sequence_pooling_types:
             if pooling_type not in LAST_POOLING:
                 return pooling_type
         return None
+
+    @property
+    def uses_last_pooling(self) -> bool:
+        return self.unsupported_sequence_pooling_type is None
 
     @property
     def sequence_pooling_types(self) -> tuple[str | None, str | None]:

@@ -55,18 +55,13 @@ class LastTokenEmbeddingPooler:
         self.config = config
 
     def is_supported(self) -> bool:
-        if self.config.has_multimodal_config:
-            return False
-        if self.config.task not in EMBED_POOLER_TASKS:
-            return False
-        if self.config.unsupported_sequence_pooling_type is not None:
-            return False
-        if not self.config.embed_activation_allowed:
-            return False
-        if self.config.chunked_processing_enabled:
-            return False
         return (
-            self.model_view.transformer_body() is not None
+            self.config.is_text_only
+            and self.config.task in EMBED_POOLER_TASKS
+            and self.config.uses_last_pooling
+            and self.config.embed_activation_allowed
+            and not self.config.chunked_processing_enabled
+            and self.model_view.transformer_body() is not None
             and self._is_decoder_embedding()
         )
 

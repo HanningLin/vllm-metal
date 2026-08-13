@@ -43,18 +43,18 @@ class Qwen3RerankerPooler:
         self.config = PoolingConfigView(model_config)
         self.tokenizer = tokenizer
         self.sequence_model = sequence_model
+        self.classifier_tokens = self._classifier_tokens()
         self.classifier_head = self._classifier_head()
 
     def is_supported(self) -> bool:
-        if self.config.has_multimodal_config:
-            return False
-        if self.config.task not in CLASSIFY_POOLER_TASKS:
-            return False
-        if self.config.unsupported_sequence_pooling_type is not None:
-            return False
-        if self.config.chunked_processing_enabled:
-            return False
-        return self._is_qwen3_reranker() and self.classifier_head is not None
+        return (
+            self.config.is_text_only
+            and self.config.task in CLASSIFY_POOLER_TASKS
+            and self.config.uses_last_pooling
+            and not self.config.chunked_processing_enabled
+            and self._is_qwen3_reranker()
+            and self.classifier_head is not None
+        )
 
     def validate_params(self, pooling_params: PoolingParams) -> None:
         if not self.is_supported():
@@ -128,7 +128,7 @@ class Qwen3RerankerPooler:
             "Qwen3ForSequenceClassification" in self.config.architectures
             and getattr(self.config.hf_config, "is_original_qwen3_reranker", False)
             is True
-            and self._classifier_tokens() == QWEN3_RERANKER_TOKENS
+            and self.classifier_tokens == QWEN3_RERANKER_TOKENS
         )
 
     def _word_embeddings_tied(self) -> bool | None:
@@ -182,7 +182,7 @@ class Qwen3RerankerPooler:
         return None
 
     def _classifier_token_ids(self) -> tuple[int, int] | None:
-        tokens = self._classifier_tokens()
+        tokens = self.classifier_tokens
         if tokens is None:
             return None
         token_ids = tuple(self._resolve_token_id(token) for token in tokens)
