@@ -35,8 +35,23 @@ class DecoderModelView:
 
     def __init__(self, model: Any) -> None:
         self.model = model
+        self.sequence_model = self._sequence_model()
 
-    def transformer_body(self) -> Any | None:
+    @property
+    def has_sequence_model(self) -> bool:
+        return self.sequence_model is not None
+
+    def forward_packed(
+        self,
+        input_ids: mx.array,
+        offset_caches: list[OffsetCache] | None,
+    ) -> mx.array:
+        assert self.sequence_model is not None
+        if offset_caches is None:
+            return self.sequence_model(input_ids)
+        return self.sequence_model(input_ids, cache=offset_caches)
+
+    def _sequence_model(self) -> Any | None:
         body = getattr(self.model, "model", None)
         return body if callable(body) else None
 
@@ -61,7 +76,7 @@ class LastTokenEmbeddingPooler:
             and self.config.uses_last_pooling
             and self.config.embed_activation_allowed
             and not self.config.chunked_processing_enabled
-            and self.model_view.transformer_body() is not None
+            and self.model_view.has_sequence_model
             and self._is_decoder_embedding()
         )
 
@@ -124,7 +139,7 @@ class MetalDecoderPoolingBackend:
             LastTokenEmbeddingPooler(self.model_view, self.config),
             Qwen3RerankerPooler(
                 model,
-                self.model_view.transformer_body(),
+                self.model_view.sequence_model,
                 model_config,
                 tokenizer,
             ),
@@ -152,26 +167,13 @@ class MetalDecoderPoolingBackend:
         offset_caches: list[OffsetCache] | None,
     ) -> mx.array:
         self.config.reject_unsupported_pooler_config()
-        body = self.model_view.transformer_body()
-        if body is None:
+        if not self.model_view.has_sequence_model:
             raise NotImplementedError(
                 "Metal pooling requires an MLX model with a callable "
                 f"'.model' transformer body; model={self.config.label}; "
                 "runner='pooling'."
             )
-
-        hidden_states = (
-            body(input_ids)
-            if offset_caches is None
-            else body(input_ids, cache=offset_caches)
-        )
-        if not hasattr(hidden_states, "shape") or not hasattr(hidden_states, "dtype"):
-            raise ValueError(
-                "Metal pooling expected MLX hidden states from model body; "
-                f"got {type(hidden_states).__name__} for model="
-                f"{self.config.label}."
-            )
-        return hidden_states
+        return self.model_view.forward_packed(input_ids, offset_caches)
 
     def pool_packed(
         self,
