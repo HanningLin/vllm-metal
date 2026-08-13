@@ -12,6 +12,8 @@ from types import ModuleType
 
 import numpy as np
 import pytest
+from transformers import AutoConfig
+from transformers.models.auto import configuration_auto
 
 import vllm_metal.compat as compat
 
@@ -209,9 +211,6 @@ class TestGemma4MTPConfigCompatPatch:
     def test_missing_registration_uses_compat_assistant_config(
         self, monkeypatch, tmp_path
     ) -> None:
-        from transformers import AutoConfig
-        from transformers.models.auto import configuration_auto
-
         config_mapping = configuration_auto.CONFIG_MAPPING
         monkeypatch.setattr(config_mapping, "_mapping", dict(config_mapping._mapping))
         monkeypatch.setattr(
