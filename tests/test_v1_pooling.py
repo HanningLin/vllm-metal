@@ -23,6 +23,12 @@ from vllm_metal.v1 import model_runner as mr  # noqa: E402
 from vllm_metal.v1.pooling.backends.decoder.models.qwen3 import (  # noqa: E402
     Qwen3RerankerPooler,
 )
+from vllm_metal.v1.pooling.backends.decoder.runtime import (  # noqa: E402
+    DecoderModelView,
+    MetalDecoderPoolingBackend,
+)
+from vllm_metal.v1.pooling.contract import DecoderPoolingSpan  # noqa: E402
+from vllm_metal.v1.pooling.validation import PoolingConfigView  # noqa: E402
 
 
 class _SequenceModel:
@@ -85,6 +91,12 @@ class _RecordingSequenceModel(_SequenceModel):
     def __call__(self, input_ids, cache=None):
         self.calls += 1
         return super().__call__(input_ids, cache=cache)
+
+
+class _NonArraySequenceModel:
+    def __call__(self, input_ids, cache=None):
+        del input_ids, cache
+        return object()
 
 
 class _PoolingModel:
@@ -422,6 +434,48 @@ class TestMetalPoolingCapabilities:
 
         assert gen_runner.supported_worker_tasks() == ("generate",)
 
+    def test_load_model_installs_pooling_backend_after_lora_setup(self) -> None:
+        events: list[str] = []
+        runner = _make_runner()
+        runner._model_lifecycle = SimpleNamespace(
+            load=lambda: events.append("load"),
+            install_pooling_backend=lambda: events.append("pooling"),
+        )
+        runner._lora = SimpleNamespace(setup=lambda **kwargs: events.append("lora"))
+        runner.metal_config = SimpleNamespace(use_paged_attention=True)
+        runner.scheduler_config = SimpleNamespace(
+            max_num_seqs=1,
+            max_num_batched_tokens=1,
+        )
+        runner.kv_cache_dtype = None
+
+        runner.load_model()
+
+        assert events == ["load", "lora", "pooling"]
+
+    def test_duplicate_supported_pooler_tasks_fail_at_backend_construction(
+        self,
+    ) -> None:
+        class _SupportedEmbedPooler:
+            task = "embed"
+
+            def is_supported(self) -> bool:
+                return True
+
+            def pool_one(self, hidden_states, span):
+                del hidden_states, span
+                return torch.zeros((1,), dtype=torch.float32)
+
+        config = PoolingConfigView(_pooling_model_config())
+        model_view = DecoderModelView(_PoolingModel())
+
+        with pytest.raises(RuntimeError, match="multiple supported poolers"):
+            MetalDecoderPoolingBackend(
+                config,
+                model_view,
+                (_SupportedEmbedPooler(), _SupportedEmbedPooler()),
+            )
+
 
 class TestMetalPoolingRunnerOutput:
     def test_paged_embed_preserves_request_order(self) -> None:
@@ -618,32 +672,53 @@ class TestMetalPoolingFailFast:
         prepare.assert_not_called()
         forward.assert_not_called()
 
+    def test_body_output_contract_fails_fast(self) -> None:
+        runner = _make_runner(model=_PoolingModel(_NonArraySequenceModel()))
+        req = _new_req("req-0", [1, 2])
+
+        with (
+            patch("vllm_metal.v1.model_runner.prepare_grouped"),
+            patch("vllm_metal.v1.model_runner.clear_context"),
+            pytest.raises(ValueError, match="expected MLX hidden states"),
+        ):
+            runner.execute_model(_scheduler_output(new_reqs=[req]))
+
     def test_classify_hidden_state_shape_fails_fast(self) -> None:
         model = _PoolingModel(_ClassifierSequenceModel())
+        span = DecoderPoolingSpan(
+            start_row=0,
+            num_tokens=1,
+            is_complete=True,
+            pooling_params=_pooling_params(task="classify"),
+        )
         with pytest.raises(ValueError, match="hidden states with shape"):
             Qwen3RerankerPooler(
                 model,
                 model.model,
                 _classification_model_config(),
                 _ClassifierTokenizer(),
-            ).pool_token(
+            ).pool_one(
                 mx.array([[1.0, 2.0]], dtype=mx.float32),
-                0,
-                _pooling_params(task="classify"),
+                span,
             )
 
     def test_classify_logits_shape_fails_fast(self) -> None:
         model = _PoolingModel(_BadClassifierSequenceModel())
+        span = DecoderPoolingSpan(
+            start_row=0,
+            num_tokens=1,
+            is_complete=True,
+            pooling_params=_pooling_params(task="classify"),
+        )
         with pytest.raises(ValueError, match="classifier logits with shape"):
             Qwen3RerankerPooler(
                 model,
                 model.model,
                 _classification_model_config(),
                 _ClassifierTokenizer(),
-            ).pool_token(
+            ).pool_one(
                 mx.array([[[1.0, 2.0, 3.0]]], dtype=mx.float32),
-                0,
-                _pooling_params(task="classify"),
+                span,
             )
 
     @pytest.mark.parametrize(

@@ -50,8 +50,6 @@ class DecoderPooler(Protocol):
 
     def is_supported(self) -> bool: ...
 
-    def validate_params(self, pooling_params: PoolingParams) -> None: ...
-
     def pool_one(
         self,
         hidden_states: mx.array,

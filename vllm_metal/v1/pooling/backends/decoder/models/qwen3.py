@@ -51,24 +51,15 @@ class Qwen3RerankerPooler:
             and self.classifier_head is not None
         )
 
-    def validate_params(self, pooling_params: PoolingParams) -> None:
-        if not self.is_supported():
-            raise NotImplementedError(
-                "Metal classify pooling requires original Qwen3 reranker "
-                "classifier_from_token=['no', 'yes'] and either lm_head for "
-                "untied checkpoints or embed_tokens.as_linear for tied "
-                "checkpoints."
-            )
-
     def pool_one(
         self,
         hidden_states: mx.array,
         span: DecoderPoolingSpan,
     ) -> torch.Tensor:
         token_index = span.start_row + span.num_tokens - 1
-        return self.pool_token(hidden_states, token_index, span.pooling_params)
+        return self._pool_token(hidden_states, token_index, span.pooling_params)
 
-    def pool_token(
+    def _pool_token(
         self,
         hidden_states: mx.array,
         token_index: int,

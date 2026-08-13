@@ -96,9 +96,6 @@ from vllm_metal.v1.model_adapter import (
     TargetModelForwardOutput,
 )
 from vllm_metal.v1.model_lifecycle import ModelLifecycle
-from vllm_metal.v1.pooling.backends.decoder.runtime import (
-    build_decoder_pooling_backend,
-)
 from vllm_metal.v1.pooling.contract import (
     DecoderPoolingBackend,
     DecoderPoolingBatch,
@@ -557,12 +554,6 @@ class MetalModelRunner:
         # cache profiling materialize weights. No-op on the single-stage path.
         if self.pp is not None:
             self.apply_pipeline_split(self.pp)
-        if self._is_pooling:
-            self._pooling_backend = build_decoder_pooling_backend(
-                self._forward_model,
-                self.model_config,
-                self.tokenizer,
-            )
         # Resolve the intermediate-forward capability once; unsupported
         # models keep the full-logits forward on every step.
         self._intermediate_forward_supported = (
@@ -584,6 +575,8 @@ class MetalModelRunner:
             dtype=self.kv_cache_dtype or mx.float16,
             max_position_embeddings=max_position_embeddings,
         )
+        if self._is_pooling:
+            self._model_lifecycle.install_pooling_backend()
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self._lora.add_adapter(lora_request)

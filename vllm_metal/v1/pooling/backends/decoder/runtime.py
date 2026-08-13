@@ -17,8 +17,8 @@ from vllm.tasks import PoolingTask
 
 from vllm_metal.attention.context import OffsetCache
 from vllm_metal.pytorch_backend.tensor_bridge import mlx_to_torch
-from vllm_metal.v1.pooling.backends.decoder.models.qwen3 import Qwen3RerankerPooler
 from vllm_metal.v1.pooling.contract import (
+    CLASSIFY_TASK,
     EMBED_TASK,
     DecoderPooler,
     DecoderPoolingBatch,
@@ -74,22 +74,15 @@ class LastTokenEmbeddingPooler:
             and self._is_decoder_embedding()
         )
 
-    def validate_params(self, pooling_params: PoolingParams) -> None:
-        if not self.is_supported():
-            raise NotImplementedError(
-                "Metal embed pooling requires a decoder-style checkpoint; got "
-                f"model={self.config.label}."
-            )
-
     def pool_one(
         self,
         hidden_states: mx.array,
         span: DecoderPoolingSpan,
     ) -> torch.Tensor:
         token_index = span.start_row + span.num_tokens - 1
-        return self.pool_token(hidden_states, token_index)
+        return self._pool_token(hidden_states, token_index)
 
-    def pool_token(self, hidden_states: mx.array, token_index: int) -> torch.Tensor:
+    def _pool_token(self, hidden_states: mx.array, token_index: int) -> torch.Tensor:
         if hidden_states.ndim != 3 or hidden_states.shape[0] != 1:
             raise ValueError(
                 "Metal embed pooling expected hidden states with shape "
@@ -126,32 +119,23 @@ class MetalDecoderPoolingBackend:
 
     capabilities = PoolingCapabilities(requires_paged_attention=True)
 
-    def __init__(self, model: Any, model_config: Any, tokenizer: Any) -> None:
-        self.config = PoolingConfigView(model_config)
-        self.model_view = DecoderModelView(model)
-        self.poolers: tuple[DecoderPooler, ...] = (
-            LastTokenEmbeddingPooler(self.model_view, self.config),
-            Qwen3RerankerPooler(
-                model,
-                self.model_view.sequence_model,
-                model_config,
-                tokenizer,
-            ),
-        )
+    def __init__(
+        self,
+        config: PoolingConfigView,
+        model_view: DecoderModelView,
+        poolers: tuple[DecoderPooler, ...],
+    ) -> None:
+        self.config = config
+        self.model_view = model_view
+        self.poolers_by_task = self._supported_poolers_by_task(poolers)
 
     def supported_tasks(self) -> tuple[PoolingTask, ...]:
-        return tuple(
-            dict.fromkeys(
-                pooler.task for pooler in self.poolers if pooler.is_supported()
-            )
-        )
+        return tuple(self.poolers_by_task)
 
     def validate_params(self, pooling_params: PoolingParams) -> None:
         task = pooling_params.task or EMBED_TASK
-        pooler = self._pooler_for_task(task)
-        if pooler is None:
+        if task not in self.poolers_by_task:
             self._raise_unsupported_task(pooling_params.task)
-        pooler.validate_params(pooling_params)
 
     def forward_packed(
         self,
@@ -165,7 +149,13 @@ class MetalDecoderPoolingBackend:
                 f"'.model' transformer body; model={self.config.label}; "
                 "runner='pooling'."
             )
-        return self.model_view.forward_packed(input_ids, offset_caches)
+        hidden_states = self.model_view.forward_packed(input_ids, offset_caches)
+        if not hasattr(hidden_states, "shape") or not hasattr(hidden_states, "dtype"):
+            raise ValueError(
+                "Metal pooling expected MLX hidden states from model body; "
+                f"got {type(hidden_states).__name__} for model={self.config.label}."
+            )
+        return hidden_states
 
     def pool_packed(
         self,
@@ -186,28 +176,42 @@ class MetalDecoderPoolingBackend:
         span: DecoderPoolingSpan,
     ) -> torch.Tensor:
         task = span.pooling_params.task or EMBED_TASK
-        pooler = self._pooler_for_task(task)
+        pooler = self.poolers_by_task.get(task)
         if pooler is None:
             self._raise_unsupported_task(span.pooling_params.task)
         return pooler.pool_one(hidden_states, span)
 
-    def _pooler_for_task(self, task: PoolingTask) -> DecoderPooler | None:
-        for pooler in self.poolers:
-            if task == pooler.task:
-                return pooler
-        return None
+    def _supported_poolers_by_task(
+        self,
+        poolers: tuple[DecoderPooler, ...],
+    ) -> dict[PoolingTask, DecoderPooler]:
+        poolers_by_task: dict[PoolingTask, DecoderPooler] = {}
+        for pooler in poolers:
+            if not pooler.is_supported():
+                continue
+            if pooler.task in poolers_by_task:
+                raise RuntimeError(
+                    "Metal pooling found multiple supported poolers for "
+                    f"task={pooler.task!r} on model={self.config.label}."
+                )
+            poolers_by_task[pooler.task] = pooler
+        return poolers_by_task
 
     def _raise_unsupported_task(self, task: PoolingTask | None) -> NoReturn:
+        if task in (None, EMBED_TASK):
+            raise NotImplementedError(
+                "Metal embed pooling requires a decoder-style checkpoint; got "
+                f"model={self.config.label}."
+            )
+        if task == CLASSIFY_TASK:
+            raise NotImplementedError(
+                "Metal classify pooling requires original Qwen3 reranker "
+                "classifier_from_token=['no', 'yes'] and either lm_head for "
+                "untied checkpoints or embed_tokens.as_linear for tied "
+                "checkpoints."
+            )
         raise NotImplementedError(
             "Metal pooling supports only text-only task='embed' and the "
             "Qwen3 reranker task='classify' for now; "
             f"got task={task!r} for model={self.config.label}."
         )
-
-
-def build_decoder_pooling_backend(
-    model: Any,
-    model_config: Any,
-    tokenizer: Any,
-) -> MetalDecoderPoolingBackend:
-    return MetalDecoderPoolingBackend(model, model_config, tokenizer)

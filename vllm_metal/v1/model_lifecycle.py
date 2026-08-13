@@ -25,6 +25,7 @@ from vllm_metal.v1.mlx_lm_paths import (
 )
 from vllm_metal.v1.mm import EncoderCache
 from vllm_metal.v1.model_adapter import ModelAdapter
+from vllm_metal.v1.pooling.registry import load_pooling_backend
 
 # Engine-core subprocesses don't always re-invoke `vllm_metal._register()`,
 # so the compat patches applied there may be missing here. Reapply on import
@@ -134,6 +135,19 @@ class ModelLifecycle:
         self._install_runtime_extensions(
             loaded_model.model_args,
             request,
+        )
+
+    def install_pooling_backend(self) -> None:
+        """Install the pooling backend for loaded pooling models."""
+        runner = self._runner
+        if not runner._is_pooling:
+            runner._pooling_backend = None
+            return
+
+        runner._pooling_backend = load_pooling_backend(
+            runner._forward_model,
+            runner.model_config,
+            runner.tokenizer,
         )
 
     def resolve_model_dims(self) -> None:
