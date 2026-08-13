@@ -189,7 +189,6 @@ class MetalDecoderPoolingBackend:
         pooler = self._pooler_for_task(task)
         if pooler is None:
             self._raise_unsupported_task(span.pooling_params.task)
-        pooler.validate_params(span.pooling_params)
         return pooler.pool_one(hidden_states, span)
 
     def _pooler_for_task(self, task: PoolingTask) -> DecoderPooler | None:

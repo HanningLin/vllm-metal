@@ -21,8 +21,7 @@ QWEN3_RERANKER_TOKENS = ("no", "yes")
 
 @dataclass(frozen=True, slots=True)
 class Qwen3ClassifierHead:
-    no_token_id: int
-    yes_token_id: int
+    token_ids: mx.array
     logits: Callable[[mx.array], mx.array]
 
 
@@ -99,15 +98,7 @@ class Qwen3RerankerPooler:
                 f"[vocab], got {vocab_logits.shape} for model={self.config.label}."
             )
 
-        token_logits = vocab_logits[
-            mx.array(
-                [
-                    self.classifier_head.no_token_id,
-                    self.classifier_head.yes_token_id,
-                ],
-                dtype=mx.int32,
-            )
-        ]
+        token_logits = vocab_logits[self.classifier_head.token_ids]
         score = token_logits[1] - token_logits[0]
         if self.config.pooler_config.logit_mean is not None:
             score = score - float(self.config.pooler_config.logit_mean)
@@ -192,8 +183,7 @@ class Qwen3RerankerPooler:
         logits_fn = self._classifier_logits_fn()
         if token_ids is None or logits_fn is None:
             return None
-        no_token_id, yes_token_id = token_ids
-        return Qwen3ClassifierHead(no_token_id, yes_token_id, logits_fn)
+        return Qwen3ClassifierHead(mx.array(token_ids, dtype=mx.int32), logits_fn)
 
     def _classifier_use_activation(self, pooling_params: PoolingParams) -> bool:
         if pooling_params.use_activation is not None:
