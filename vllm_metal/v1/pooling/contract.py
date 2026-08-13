@@ -13,6 +13,9 @@ from vllm.tasks import PoolingTask
 
 from vllm_metal.attention.context import OffsetCache
 
+EMBED_TASK: PoolingTask = "embed"
+CLASSIFY_TASK: PoolingTask = "classify"
+
 
 @dataclass(frozen=True, slots=True)
 class PoolingCapabilities:

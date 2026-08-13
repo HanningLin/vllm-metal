@@ -619,9 +619,11 @@ class TestMetalPoolingFailFast:
         forward.assert_not_called()
 
     def test_classify_hidden_state_shape_fails_fast(self) -> None:
+        model = _PoolingModel(_ClassifierSequenceModel())
         with pytest.raises(ValueError, match="hidden states with shape"):
             Qwen3RerankerPooler(
-                _PoolingModel(_ClassifierSequenceModel()),
+                model,
+                model.model,
                 _classification_model_config(),
                 _ClassifierTokenizer(),
             ).pool_token(
@@ -631,9 +633,11 @@ class TestMetalPoolingFailFast:
             )
 
     def test_classify_logits_shape_fails_fast(self) -> None:
+        model = _PoolingModel(_BadClassifierSequenceModel())
         with pytest.raises(ValueError, match="classifier logits with shape"):
             Qwen3RerankerPooler(
-                _PoolingModel(_BadClassifierSequenceModel()),
+                model,
+                model.model,
                 _classification_model_config(),
                 _ClassifierTokenizer(),
             ).pool_token(

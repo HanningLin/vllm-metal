@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Qwen3 reranker pooling behavior."""
+"""Qwen3 reranker ``classify`` pooling behavior."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 import mlx.core as mx
@@ -11,19 +13,37 @@ from vllm.pooling_params import PoolingParams
 from vllm.tasks import PoolingTask
 
 from vllm_metal.pytorch_backend.tensor_bridge import mlx_to_torch
-from vllm_metal.v1.pooling.contract import DecoderPoolingSpan
-from vllm_metal.v1.pooling.validation import CLASSIFY_POOLER_TASKS, PoolingConfigView
+from vllm_metal.v1.pooling.contract import CLASSIFY_TASK, DecoderPoolingSpan
+from vllm_metal.v1.pooling.validation import PoolingConfigView
+
+CLASSIFY_POOLER_TASKS = (None, CLASSIFY_TASK)
+QWEN3_RERANKER_TOKENS = ("no", "yes")
+
+
+@dataclass(frozen=True, slots=True)
+class Qwen3ClassifierHead:
+    no_token_id: int
+    yes_token_id: int
+    logits: Callable[[mx.array], mx.array]
 
 
 class Qwen3RerankerPooler:
     """Pool Qwen3 reranker hidden states as yes-minus-no scores."""
 
-    task: PoolingTask = "classify"
+    task: PoolingTask = CLASSIFY_TASK
 
-    def __init__(self, model: Any, model_config: Any, tokenizer: Any) -> None:
+    def __init__(
+        self,
+        model: Any,
+        sequence_model: Any | None,
+        model_config: Any,
+        tokenizer: Any,
+    ) -> None:
         self.model = model
         self.config = PoolingConfigView(model_config)
         self.tokenizer = tokenizer
+        self.sequence_model = sequence_model
+        self.classifier_head = self._classifier_head()
 
     def is_supported(self) -> bool:
         if self.config.has_multimodal_config:
@@ -34,11 +54,7 @@ class Qwen3RerankerPooler:
             return False
         if self.config.chunked_processing_enabled:
             return False
-        return (
-            self.config.is_qwen3_reranker
-            and self._classifier_logits_fn() is not None
-            and self._classifier_token_ids() is not None
-        )
+        return self._is_qwen3_reranker() and self.classifier_head is not None
 
     def validate_params(self, pooling_params: PoolingParams) -> None:
         if not self.is_supported():
@@ -75,40 +91,45 @@ class Qwen3RerankerPooler:
                 f"state shape {hidden_states.shape} for model={self.config.label}."
             )
 
-        token_ids = self._classifier_token_ids()
-        logits_fn = self._classifier_logits_fn()
-        if token_ids is None or logits_fn is None:
-            raise NotImplementedError(
-                "Metal classify pooling requires original Qwen3 reranker "
-                "classifier_from_token=['no', 'yes'] and either lm_head for "
-                "untied checkpoints or embed_tokens.as_linear for tied "
-                "checkpoints."
-            )
+        assert self.classifier_head is not None
 
-        no_id, yes_id = token_ids
         vector = hidden_states[0, token_index, :].astype(mx.float32)
-        vocab_logits = mx.squeeze(logits_fn(vector).astype(mx.float32))
+        vocab_logits = mx.squeeze(
+            self.classifier_head.logits(vector).astype(mx.float32)
+        )
         if vocab_logits.ndim != 1:
             raise ValueError(
                 "Metal classify pooling expected classifier logits with shape "
                 f"[vocab], got {vocab_logits.shape} for model={self.config.label}."
             )
 
-        token_logits = vocab_logits[mx.array([no_id, yes_id], dtype=mx.int32)]
+        token_logits = vocab_logits[
+            mx.array(
+                [
+                    self.classifier_head.no_token_id,
+                    self.classifier_head.yes_token_id,
+                ],
+                dtype=mx.int32,
+            )
+        ]
         score = token_logits[1] - token_logits[0]
-        if self.config.logit_mean is not None:
-            score = score - self.config.logit_mean
-        if self.config.logit_sigma is not None:
-            score = score / self.config.logit_sigma
+        if self.config.pooler_config.logit_mean is not None:
+            score = score - float(self.config.pooler_config.logit_mean)
+        if self.config.pooler_config.logit_sigma is not None:
+            score = score / float(self.config.pooler_config.logit_sigma)
         if self._classifier_use_activation(pooling_params):
             score = mx.sigmoid(score)
 
         tensor = mlx_to_torch(score.reshape((1,)), device="cpu")
         return tensor.detach().clone()
 
-    def _sequence_model(self) -> Any | None:
-        inner = getattr(self.model, "model", None)
-        return inner if callable(inner) else None
+    def _is_qwen3_reranker(self) -> bool:
+        return (
+            "Qwen3ForSequenceClassification" in self.config.architectures
+            and getattr(self.config.hf_config, "is_original_qwen3_reranker", False)
+            is True
+            and self._classifier_tokens() == QWEN3_RERANKER_TOKENS
+        )
 
     def _word_embeddings_tied(self) -> bool | None:
         for source in (
@@ -122,15 +143,14 @@ class Qwen3RerankerPooler:
         return None
 
     def _tied_embedding_logits_fn(self) -> Any | None:
-        body = self._sequence_model()
-        if body is None:
+        if self.sequence_model is None:
             return None
-        embed_tokens = getattr(body, "embed_tokens", None)
+        embed_tokens = getattr(self.sequence_model, "embed_tokens", None)
         as_linear = getattr(embed_tokens, "as_linear", None)
         return as_linear if callable(as_linear) else None
 
     def _classifier_logits_fn(self) -> Any | None:
-        if self._sequence_model() is None:
+        if self.sequence_model is None:
             return None
 
         lm_head = getattr(self.model, "lm_head", None)
@@ -162,7 +182,7 @@ class Qwen3RerankerPooler:
         return None
 
     def _classifier_token_ids(self) -> tuple[int, int] | None:
-        tokens = self.config.classifier_tokens
+        tokens = self._classifier_tokens()
         if tokens is None:
             return None
         token_ids = tuple(self._resolve_token_id(token) for token in tokens)
@@ -172,7 +192,21 @@ class Qwen3RerankerPooler:
         assert no_id is not None and yes_id is not None
         return (no_id, yes_id)
 
+    def _classifier_head(self) -> Qwen3ClassifierHead | None:
+        token_ids = self._classifier_token_ids()
+        logits_fn = self._classifier_logits_fn()
+        if token_ids is None or logits_fn is None:
+            return None
+        no_token_id, yes_token_id = token_ids
+        return Qwen3ClassifierHead(no_token_id, yes_token_id, logits_fn)
+
     def _classifier_use_activation(self, pooling_params: PoolingParams) -> bool:
         if pooling_params.use_activation is not None:
             return pooling_params.use_activation
-        return self.config.use_activation_by_default
+        return self.config.pooler_config.use_activation is not False
+
+    def _classifier_tokens(self) -> tuple[str, str] | None:
+        tokens = getattr(self.config.hf_config, "classifier_from_token", None)
+        if not isinstance(tokens, (list, tuple)) or len(tokens) != 2:
+            return None
+        return (str(tokens[0]), str(tokens[1]))

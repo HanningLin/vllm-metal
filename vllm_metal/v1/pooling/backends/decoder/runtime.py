@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Decoder-style pooling backend."""
+"""Generic decoder pooling backend.
+
+This module owns packed decoder execution and LAST-token embedding pooling.
+Model-family files provide only task-specific poolers, for example Qwen3
+reranker ``classify`` scoring.
+"""
 
 from __future__ import annotations
 
@@ -14,15 +19,15 @@ from vllm_metal.attention.context import OffsetCache
 from vllm_metal.pytorch_backend.tensor_bridge import mlx_to_torch
 from vllm_metal.v1.pooling.backends.decoder.models.qwen3 import Qwen3RerankerPooler
 from vllm_metal.v1.pooling.contract import (
+    EMBED_TASK,
     DecoderPooler,
     DecoderPoolingBatch,
     DecoderPoolingSpan,
     PoolingCapabilities,
 )
-from vllm_metal.v1.pooling.validation import (
-    EMBED_POOLER_TASKS,
-    PoolingConfigView,
-)
+from vllm_metal.v1.pooling.validation import PoolingConfigView
+
+EMBED_POOLER_TASKS = (None, EMBED_TASK)
 
 
 class DecoderModelView:
@@ -39,7 +44,7 @@ class DecoderModelView:
 class LastTokenEmbeddingPooler:
     """Pool decoder hidden states into normalized LAST-token embeddings."""
 
-    task: PoolingTask = "embed"
+    task: PoolingTask = EMBED_TASK
 
     def __init__(
         self,
@@ -62,7 +67,7 @@ class LastTokenEmbeddingPooler:
             return False
         return (
             self.model_view.transformer_body() is not None
-            and self.config.is_decoder_embedding
+            and self._is_decoder_embedding()
         )
 
     def validate_params(self, pooling_params: PoolingParams) -> None:
@@ -103,6 +108,14 @@ class LastTokenEmbeddingPooler:
         norm = mx.maximum(norm, mx.array(1e-12, dtype=mx.float32))
         return mx.contiguous(vector / norm)
 
+    def _is_decoder_embedding(self) -> bool:
+        return any(
+            architecture.endswith("ForCausalLM")
+            or architecture.endswith("ForTextEncoding")
+            or architecture.endswith("EmbeddingModel")
+            for architecture in self.config.architectures
+        )
+
 
 class MetalDecoderPoolingBackend:
     """Decoder pooling backend for current Metal text pooling behavior."""
@@ -114,14 +127,19 @@ class MetalDecoderPoolingBackend:
         self.model_view = DecoderModelView(model)
         self.poolers: tuple[DecoderPooler, ...] = (
             LastTokenEmbeddingPooler(self.model_view, self.config),
-            Qwen3RerankerPooler(model, model_config, tokenizer),
+            Qwen3RerankerPooler(
+                model,
+                self.model_view.transformer_body(),
+                model_config,
+                tokenizer,
+            ),
         )
 
     def supported_tasks(self) -> tuple[PoolingTask, ...]:
         return tuple(pooler.task for pooler in self.poolers if pooler.is_supported())
 
     def validate_params(self, pooling_params: PoolingParams) -> None:
-        task = pooling_params.task or "embed"
+        task = pooling_params.task or EMBED_TASK
         for pooler in self.poolers:
             if task == pooler.task:
                 pooler.validate_params(pooling_params)
@@ -178,7 +196,7 @@ class MetalDecoderPoolingBackend:
         hidden_states: mx.array,
         span: DecoderPoolingSpan,
     ) -> torch.Tensor:
-        task = span.pooling_params.task or "embed"
+        task = span.pooling_params.task or EMBED_TASK
         for pooler in self.poolers:
             if task == pooler.task and pooler.is_supported():
                 return pooler.pool_one(hidden_states, span)

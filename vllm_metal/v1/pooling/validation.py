@@ -7,15 +7,21 @@ from dataclasses import dataclass
 from typing import Any
 
 from vllm.pooling_params import PoolingParams
+from vllm.tasks import PoolingTask
 from vllm.v1.core.sched.output import NewRequestData
 
-from vllm_metal.v1.pooling.contract import PoolingBackend
+from vllm_metal.v1.pooling.contract import (
+    CLASSIFY_TASK,
+    EMBED_TASK,
+    PoolingBackend,
+)
 
-EMBED_POOLER_TASKS = (None, "embed")
-CLASSIFY_POOLER_TASKS = (None, "classify")
-QWEN3_RERANKER_TOKENS = ("no", "yes")
-SUPPORTED_POOLER_TASKS = EMBED_POOLER_TASKS + ("classify",)
 LAST_POOLING = (None, "LAST")
+SUPPORTED_POOLER_TASKS: tuple[PoolingTask | None, ...] = (
+    None,
+    EMBED_TASK,
+    CLASSIFY_TASK,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,9 +51,8 @@ class PoolingConfigView:
         return str(runner_type) if runner_type is not None else None
 
     @property
-    def task(self) -> str | None:
-        task = self.pooler_config.task
-        return str(task) if task is not None else None
+    def task(self) -> PoolingTask | None:
+        return self.pooler_config.task
 
     @property
     def architectures(self) -> tuple[str, ...]:
@@ -85,44 +90,6 @@ class PoolingConfigView:
         return bool(self.pooler_config.enable_chunked_processing)
 
     @property
-    def classifier_tokens(self) -> tuple[str, str] | None:
-        tokens = getattr(self.hf_config, "classifier_from_token", None)
-        if not isinstance(tokens, (list, tuple)) or len(tokens) != 2:
-            return None
-        return (str(tokens[0]), str(tokens[1]))
-
-    @property
-    def is_decoder_embedding(self) -> bool:
-        return any(
-            architecture.endswith("ForCausalLM")
-            or architecture.endswith("ForTextEncoding")
-            or architecture.endswith("EmbeddingModel")
-            for architecture in self.architectures
-        )
-
-    @property
-    def is_qwen3_reranker(self) -> bool:
-        return (
-            "Qwen3ForSequenceClassification" in self.architectures
-            and getattr(self.hf_config, "is_original_qwen3_reranker", False) is True
-            and self.classifier_tokens == QWEN3_RERANKER_TOKENS
-        )
-
-    @property
-    def logit_mean(self) -> float | None:
-        value = self.pooler_config.logit_mean
-        return float(value) if value is not None else None
-
-    @property
-    def logit_sigma(self) -> float | None:
-        value = self.pooler_config.logit_sigma
-        return float(value) if value is not None else None
-
-    @property
-    def use_activation_by_default(self) -> bool:
-        return self.pooler_config.use_activation is not False
-
-    @property
     def has_embedding_dimension_override(self) -> bool:
         return self.pooler_config.dimensions is not None
 
@@ -157,7 +124,10 @@ class PoolingConfigView:
             return "returned_token_ids"
         if pooling_params.extra_kwargs:
             return "extra pooling kwargs"
-        if pooling_params.task != "classify" and pooling_params.use_activation is False:
+        if (
+            pooling_params.task != CLASSIFY_TASK
+            and pooling_params.use_activation is False
+        ):
             return "use_activation=False"
         if (
             pooling_params.dimensions is not None

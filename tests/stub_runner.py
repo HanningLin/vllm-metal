@@ -93,9 +93,7 @@ def make_stub_runner(
         runner._paged_scheduler_group_indices = (0,)
         runner._paged_group_block_sizes = (attrs["_paged_block_size"],)
     if "_is_pooling" not in attrs:
-        runner._is_pooling = (
-            getattr(runner.model_config, "runner_type", None) == "pooling"
-        )
+        runner._is_pooling = runner.model_config.runner_type == "pooling"
     if "_pooling_backend" not in attrs:
         runner._pooling_backend = (
             build_decoder_pooling_backend(
@@ -103,7 +101,7 @@ def make_stub_runner(
                 runner.model_config,
                 runner.tokenizer,
             )
-            if runner._is_pooling
+            if runner.model_config.runner_type == "pooling"
             else None
         )
 

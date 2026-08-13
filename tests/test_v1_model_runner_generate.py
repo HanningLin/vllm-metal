@@ -80,6 +80,15 @@ class ForwardOutputRuntimeStub:
         return None
 
 
+class PoolingForwardBackendStub:
+    def __init__(self, hidden_states: mx.array) -> None:
+        self.hidden_states = hidden_states
+
+    def forward_packed(self, input_ids, offset_caches):
+        del input_ids, offset_caches
+        return self.hidden_states
+
+
 def test_gemma4_mtp_config_installs_gemma4_proposer() -> None:
     runner = make_stub_runner(tokenizer=object())
     runner.vllm_config = SimpleNamespace(
@@ -1667,18 +1676,13 @@ class TestV1MetalModelRunnerGDNSubmit:
     def test_pooling_forward_submits_runtime_outputs(self, monkeypatch) -> None:
         submitted: list[tuple[object, ...]] = []
         runtime = self.make_runtime_with_side_effects()
+        pooling_hidden_states = mx.array([[[1.0]]], dtype=mx.float32)
         runner = make_stub_runner(
             _paged_attention_runtime=runtime,
             _is_pooling=True,
+            _pooling_backend=PoolingForwardBackendStub(pooling_hidden_states),
             _paged_block_size=4,
             num_layers=0,
-        )
-        pooling_hidden_states = mx.array([[[1.0]]], dtype=mx.float32)
-        assert runner._pooling_backend is not None
-        monkeypatch.setattr(
-            runner._pooling_backend,
-            "forward_packed",
-            lambda input_ids, offset_caches: pooling_hidden_states,
         )
         monkeypatch.setattr(mr.mx, "async_eval", lambda *args: submitted.append(args))
 
