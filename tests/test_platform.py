@@ -81,8 +81,8 @@ class TestMetalPlatform:
         config.additional_config = {}
         return config
 
-    @staticmethod
     def _patch_stt_resolution(
+        self,
         monkeypatch: pytest.MonkeyPatch,
         is_stt: bool,
     ) -> None:
@@ -403,8 +403,9 @@ class TestMetalPlatform:
         with pytest.raises(NotImplementedError, match="tensor parallelism"):
             MetalPlatform.check_and_update_config(vllm_config)
 
-    @staticmethod
-    def _dp_parallel_config(**overrides: object) -> ParallelConfig:
+    def _dp_parallel_config(
+        self, overrides: dict[str, object] | None = None
+    ) -> ParallelConfig:
         """A valid dense data-parallel-over-Ray parallel_config, with overrides.
 
         Defaults to the one supported shape (dense + ray backend + local==1 +
@@ -424,7 +425,8 @@ class TestMetalPlatform:
             "data_parallel_external_lb": False,
             "data_parallel_hybrid_lb": False,
         }
-        base.update(overrides)
+        if overrides is not None:
+            base.update(overrides)
         parallel = ParallelConfig()
         for field, value in base.items():
             setattr(parallel, field, value)
@@ -432,7 +434,7 @@ class TestMetalPlatform:
 
     def _dp_vllm_config(
         self,
-        parallel: dict | None = None,
+        parallel: dict[str, object] | None = None,
         parallel_config: object = None,
         model: dict | None = None,
         speculative_config: object = None,
@@ -460,7 +462,7 @@ class TestMetalPlatform:
             parallel_config=(
                 parallel_config
                 if parallel_config is not None
-                else self._dp_parallel_config(**(parallel or {}))
+                else self._dp_parallel_config(parallel)
             ),
             cache_config=SimpleNamespace(
                 kv_cache_dtype_skip_layers=[],
@@ -478,8 +480,7 @@ class TestMetalPlatform:
             lora_config=lora_config,
         )
 
-    @staticmethod
-    def _stub_ray(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
+    def _stub_ray(self, monkeypatch: pytest.MonkeyPatch) -> list[dict]:
         """Stub ray.init / is_initialized and reset the DP-hook flag so a unit test
         exercising the DP admission never contacts a real cluster. Returns the list
         that captures ray.init kwargs."""
