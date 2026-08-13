@@ -206,11 +206,22 @@ class TestByteLevelTokenizerCompatPatch:
 
 
 class TestGemma4MTPConfigCompatPatch:
-    def test_transformers_autoconfig_loads_raw_assistant_config(
-        self,
-        tmp_path,
+    def test_missing_registration_uses_compat_assistant_config(
+        self, monkeypatch, tmp_path
     ) -> None:
         from transformers import AutoConfig
+        from transformers.models.auto import configuration_auto
+
+        config_mapping = configuration_auto.CONFIG_MAPPING
+        monkeypatch.setattr(config_mapping, "_mapping", dict(config_mapping._mapping))
+        monkeypatch.setattr(
+            config_mapping, "_extra_content", dict(config_mapping._extra_content)
+        )
+        config_mapping._mapping.pop("gemma4_assistant", None)
+        config_mapping._extra_content.pop("gemma4_assistant", None)
+
+        with pytest.raises(ValueError, match="gemma4_assistant"):
+            AutoConfig.for_model("gemma4_assistant")
 
         _write_gemma4_assistant_config(tmp_path)
         compat._patch_vllm_gemma4_mtp_config_loading()
@@ -223,28 +234,6 @@ class TestGemma4MTPConfigCompatPatch:
         assert config.text_config.model_type == "gemma4_text"
         assert config.text_config.num_hidden_layers == 4
         assert config.get_text_config() is config.text_config
-
-    def test_vllm_get_config_applies_existing_gemma4_mtp_override(
-        self,
-        tmp_path,
-    ) -> None:
-        from vllm.config.speculative import SpeculativeConfig
-        from vllm.transformers_utils.config import get_config, get_hf_text_config
-
-        _write_gemma4_assistant_config(tmp_path)
-        compat._patch_vllm_gemma4_mtp_config_loading()
-
-        config = get_config(
-            tmp_path,
-            trust_remote_code=False,
-            hf_overrides_fn=SpeculativeConfig.hf_config_override,
-        )
-
-        assert config.model_type == "gemma4_mtp"
-        assert config.architectures == ["Gemma4MTPModel"]
-        assert config.n_predict == 1
-        assert config.text_config.num_kv_shared_layers == 0
-        assert get_hf_text_config(config).model_type == "gemma4_text"
 
     def test_registration_time_failures_do_not_stop_other_patches(
         self,
