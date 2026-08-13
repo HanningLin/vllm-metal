@@ -355,8 +355,8 @@ class MetalPlatform(Platform):
 
         # Apply TurboQuant config from --additional-config
         # Example: --additional-config '{"turboquant": true, "k_quant": "q4_0"}'
-        add = getattr(vllm_config, "additional_config", None) or {}
-        if add.get("turboquant"):
+        add = vllm_config.additional_config
+        if isinstance(add, dict) and add.get("turboquant"):
             config.turboquant = True
             config.k_quant = add.get("k_quant", "q8_0")
             config.v_quant = add.get("v_quant", "q3_0")
@@ -538,7 +538,7 @@ class MetalPlatform(Platform):
         # installed above covers it unchanged. We only relax admission: allow that
         # validated dense-DP-over-Ray shape and fail fast on every other DP
         # combination this reachability newly admits (guard-widening audit).
-        if getattr(parallel_config, "data_parallel_size", 1) > 1:
+        if parallel_config.data_parallel_size > 1:
             # MoE DP routes to DPMoEEngineCoreActor + an expert-parallel all-to-all
             # that mx.distributed has no equivalent for; only dense DP is validated.
             if model_config is not None and model_config.is_moe:
@@ -657,7 +657,7 @@ class MetalPlatform(Platform):
                 "remove --enable-lora or run with pipeline_parallel_size=1."
             )
 
-        if getattr(scheduler_config, "enable_chunked_prefill", False):
+        if scheduler_config.enable_chunked_prefill:
             if config.use_paged_attention:
                 # The paged path uses a unified varlen Metal kernel that
                 # handles mixed prefill + decode in a single forward pass,
@@ -710,7 +710,7 @@ class MetalPlatform(Platform):
             # model served on the text-only backbone (multimodal_config cleared by
             # the adapter) is not wrongly rejected — only a genuine multimodal model.
             if (
-                getattr(parallel_config, "data_parallel_size", 1) > 1
+                parallel_config.data_parallel_size > 1
                 and model_config.multimodal_config is not None
             ):
                 raise NotImplementedError(
@@ -739,7 +739,7 @@ class MetalPlatform(Platform):
                     "Pipeline parallelism (pipeline_parallel_size > 1) is not "
                     "supported for speech-to-text models."
                 )
-            if getattr(parallel_config, "data_parallel_size", 1) > 1:
+            if parallel_config.data_parallel_size > 1:
                 raise NotImplementedError(
                     "Data parallelism (data_parallel_size > 1) is not "
                     "supported for speech-to-text models."
@@ -770,7 +770,7 @@ class MetalPlatform(Platform):
         # the engine connects — register the Apple-GPU worker patch at the Ray job
         # level so it reaches the per-replica RayWorkerProc workers (the
         # executor-level ray_runtime_env hook does not propagate on the DP path).
-        if getattr(parallel_config, "data_parallel_size", 1) > 1:
+        if parallel_config.data_parallel_size > 1:
             cls._register_dp_ray_worker_setup_hook(parallel_config.ray_runtime_env)
 
         # Log memory configuration
