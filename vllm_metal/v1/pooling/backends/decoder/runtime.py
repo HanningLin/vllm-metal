@@ -23,13 +23,7 @@ from vllm_metal.v1.pooling.contract import (
 )
 from vllm_metal.v1.pooling.validation import (
     EMBED_POOLER_TASKS,
-    chunked_processing_enabled,
-    is_decoder_embedding_config,
-    model_label,
-    pooler_activation_allows_embed,
-    pooler_task,
-    reject_unsupported_pooler_config,
-    unsupported_sequence_pooling_type,
+    PoolingConfigView,
 )
 
 
@@ -49,9 +43,13 @@ class LastTokenEmbeddingPooler:
 
     task: PoolingTask = "embed"
 
-    def __init__(self, model_view: DecoderModelView, model_config: Any) -> None:
+    def __init__(
+        self,
+        model_view: DecoderModelView,
+        config: PoolingConfigView,
+    ) -> None:
         self.model_view = model_view
-        self.model_config = model_config
+        self.config = config
 
     def supported_tasks(self) -> tuple[PoolingTask, ...]:
         if not self._supported():
@@ -62,7 +60,7 @@ class LastTokenEmbeddingPooler:
         if not self._supported():
             raise NotImplementedError(
                 "Metal embed pooling requires a decoder-style checkpoint; got "
-                f"model={model_label(self.model_config)}."
+                f"model={self.config.label}."
             )
 
     def pool_one(
@@ -78,13 +76,12 @@ class LastTokenEmbeddingPooler:
             raise ValueError(
                 "Metal embed pooling expected hidden states with shape "
                 f"[1, tokens, hidden], got {hidden_states.shape} "
-                f"for model={model_label(self.model_config)}."
+                f"for model={self.config.label}."
             )
         if token_index < 0 or token_index >= hidden_states.shape[1]:
             raise ValueError(
                 f"Metal embed pooling token index {token_index} is outside hidden "
-                f"state shape {hidden_states.shape} for model="
-                f"{model_label(self.model_config)}."
+                f"state shape {hidden_states.shape} for model={self.config.label}."
             )
 
         vector = hidden_states[0, token_index, :].astype(mx.float32)
@@ -98,19 +95,19 @@ class LastTokenEmbeddingPooler:
         return mx.contiguous(vector / norm)
 
     def _supported(self) -> bool:
-        if getattr(self.model_config, "multimodal_config", None) is not None:
+        if self.config.has_multimodal_config:
             return False
-        if pooler_task(self.model_config) not in EMBED_POOLER_TASKS:
+        if self.config.task not in EMBED_POOLER_TASKS:
             return False
-        if unsupported_sequence_pooling_type(self.model_config) is not None:
+        if self.config.unsupported_sequence_pooling_type is not None:
             return False
-        if not pooler_activation_allows_embed(self.model_config):
+        if not self.config.embed_activation_allowed:
             return False
-        if chunked_processing_enabled(self.model_config):
+        if self.config.chunked_processing_enabled:
             return False
         return (
             self.model_view.transformer_body() is not None
-            and is_decoder_embedding_config(self.model_config)
+            and self.config.is_decoder_embedding
         )
 
 
@@ -128,9 +125,10 @@ class MetalDecoderPoolingBackend:
         self.model = model
         self.model_config = model_config
         self.tokenizer = tokenizer
+        self.config = PoolingConfigView(model_config)
         self.model_view = DecoderModelView(model)
         self.poolers: tuple[DecoderPooler, ...] = (
-            LastTokenEmbeddingPooler(self.model_view, model_config),
+            LastTokenEmbeddingPooler(self.model_view, self.config),
             Qwen3RerankerPooler(model, model_config, tokenizer),
         )
 
@@ -150,7 +148,7 @@ class MetalDecoderPoolingBackend:
             "Metal pooling supports only text-only task='embed' and the "
             "Qwen3 reranker task='classify' for now; "
             f"got task={pooling_params.task!r} for model="
-            f"{model_label(self.model_config)}."
+            f"{self.config.label}."
         )
 
     def forward_packed(
@@ -158,12 +156,12 @@ class MetalDecoderPoolingBackend:
         input_ids: mx.array,
         offset_caches: list[OffsetCache] | None,
     ) -> mx.array:
-        reject_unsupported_pooler_config(self.model_config)
+        self.config.reject_unsupported_pooler_config()
         body = self.model_view.transformer_body()
         if body is None:
             raise NotImplementedError(
                 "Metal pooling requires an MLX model with a callable "
-                f"'.model' transformer body; model={model_label(self.model_config)}; "
+                f"'.model' transformer body; model={self.config.label}; "
                 "runner='pooling'."
             )
 
@@ -176,7 +174,7 @@ class MetalDecoderPoolingBackend:
             raise ValueError(
                 "Metal pooling expected MLX hidden states from model body; "
                 f"got {type(hidden_states).__name__} for model="
-                f"{model_label(self.model_config)}."
+                f"{self.config.label}."
             )
         return hidden_states
 
@@ -206,7 +204,7 @@ class MetalDecoderPoolingBackend:
             "Metal pooling supports only text-only task='embed' and the "
             "Qwen3 reranker task='classify' for now; "
             f"got task={span.pooling_params.task!r} for model="
-            f"{model_label(self.model_config)}."
+            f"{self.config.label}."
         )
 
 
