@@ -20,7 +20,9 @@ from tests.stub_runner import make_stub_runner  # noqa: E402
 from vllm_metal.attention.runtime.mha import MHAPagedAttentionRuntime  # noqa: E402
 from vllm_metal.multimodal import MultiModalFeatureSpec, PlaceholderRange  # noqa: E402
 from vllm_metal.v1 import model_runner as mr  # noqa: E402
-from vllm_metal.v1.pooling import pool_sequence_classification  # noqa: E402
+from vllm_metal.v1.pooling.backends.decoder.models.qwen3 import (  # noqa: E402
+    Qwen3RerankerPooler,
+)
 
 
 class _SequenceModel:
@@ -592,26 +594,47 @@ class TestMetalPoolingFailFast:
         with pytest.raises(NotImplementedError, match="task"):
             runner.execute_model(_scheduler_output(new_reqs=[req]))
 
+    def test_incomplete_classify_contract_fails_before_forward(self) -> None:
+        runner = _make_runner(
+            model=_PoolingModel(_SequenceModel()),
+            model_config=_classification_model_config(),
+            tokenizer=_ClassifierTokenizer(),
+        )
+        req = _new_req("req-0", [1, 2], task="classify")
+
+        assert runner._pooling_backend is not None
+        with (
+            patch("vllm_metal.v1.model_runner.prepare_grouped") as prepare,
+            patch.object(runner._pooling_backend, "forward_packed") as forward,
+            pytest.raises(NotImplementedError, match="classify pooling requires"),
+        ):
+            runner.execute_model(_scheduler_output(new_reqs=[req]))
+
+        prepare.assert_not_called()
+        forward.assert_not_called()
+
     def test_classify_hidden_state_shape_fails_fast(self) -> None:
         with pytest.raises(ValueError, match="hidden states with shape"):
-            pool_sequence_classification(
+            Qwen3RerankerPooler(
+                _PoolingModel(_ClassifierSequenceModel()),
+                _classification_model_config(),
+                _ClassifierTokenizer(),
+            ).pool_token(
                 mx.array([[1.0, 2.0]], dtype=mx.float32),
-                token_index=0,
-                model=_PoolingModel(_ClassifierSequenceModel()),
-                tokenizer=_ClassifierTokenizer(),
-                pooling_params=_pooling_params(task="classify"),
-                model_config=_classification_model_config(),
+                0,
+                _pooling_params(task="classify"),
             )
 
     def test_classify_logits_shape_fails_fast(self) -> None:
         with pytest.raises(ValueError, match="classifier logits with shape"):
-            pool_sequence_classification(
+            Qwen3RerankerPooler(
+                _PoolingModel(_BadClassifierSequenceModel()),
+                _classification_model_config(),
+                _ClassifierTokenizer(),
+            ).pool_token(
                 mx.array([[[1.0, 2.0, 3.0]]], dtype=mx.float32),
-                token_index=0,
-                model=_PoolingModel(_BadClassifierSequenceModel()),
-                tokenizer=_ClassifierTokenizer(),
-                pooling_params=_pooling_params(task="classify"),
-                model_config=_classification_model_config(),
+                0,
+                _pooling_params(task="classify"),
             )
 
     @pytest.mark.parametrize(
@@ -648,11 +671,10 @@ class TestMetalPoolingFailFast:
             )
         ]
 
+        assert runner._pooling_backend is not None
         with (
             patch("vllm_metal.v1.model_runner.prepare_grouped") as prepare,
-            patch(
-                "vllm_metal.v1.model_runner.forward_sequence_hidden_states"
-            ) as forward,
+            patch.object(runner._pooling_backend, "forward_packed") as forward,
             pytest.raises(NotImplementedError, match="Multimodal pooling"),
         ):
             runner.execute_model(_scheduler_output(new_reqs=[req]))
@@ -666,11 +688,10 @@ class TestMetalPoolingFailFast:
         req = _new_req("req-0", [1, 2])
         req.prompt_embeds = torch.zeros((1, 2, 3), dtype=torch.float32)
 
+        assert runner._pooling_backend is not None
         with (
             patch("vllm_metal.v1.model_runner.prepare_grouped") as prepare,
-            patch(
-                "vllm_metal.v1.model_runner.forward_sequence_hidden_states"
-            ) as forward,
+            patch.object(runner._pooling_backend, "forward_packed") as forward,
             pytest.raises(NotImplementedError, match="Prompt-embedding pooling"),
         ):
             runner.execute_model(_scheduler_output(new_reqs=[req]))

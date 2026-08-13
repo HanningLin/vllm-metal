@@ -96,14 +96,15 @@ from vllm_metal.v1.model_adapter import (
     TargetModelForwardOutput,
 )
 from vllm_metal.v1.model_lifecycle import ModelLifecycle
-from vllm_metal.v1.pooling import (
-    finish_paged_pooling_batch,
-    forward_sequence_hidden_states,
+from vllm_metal.v1.pooling.backends.decoder.batching import (
     has_paged_pooling_work,
-    pooling_dummy_forward_outputs,
-    supported_pooling_tasks,
-    validate_pooling_request,
+    pool_paged_prefill_batch,
 )
+from vllm_metal.v1.pooling.backends.decoder.runtime import (
+    build_decoder_pooling_backend,
+)
+from vllm_metal.v1.pooling.contract import DecoderPoolingBackend
+from vllm_metal.v1.pooling.validation import validate_pooling_request
 from vllm_metal.v1.proposer import (
     Gemma4MTPProposer,
     MetalProposer,
@@ -326,6 +327,7 @@ class MetalModelRunner:
         self._is_pooling: bool = (
             getattr(self.model_config, "runner_type", None) == "pooling"
         )
+        self._pooling_backend: DecoderPoolingBackend | None = None
         self._multimodal_adapter: MultimodalRuntimeAdapter | None = None
         self._gemma4_mtp_assistant: Gemma4MTPAssistantRuntime | None = None
         self._drafter: MetalProposer | None = None
@@ -501,9 +503,9 @@ class MetalModelRunner:
         if self._is_pooling:
             if self._paged_attention_runtime is None:
                 return ()
-            return supported_pooling_tasks(
-                self._forward_model, self.model_config, self.tokenizer
-            )
+            if self._pooling_backend is None:
+                return ()
+            return self._pooling_backend.supported_tasks()
         return ("generate",)
 
     def load_model(self) -> None:
@@ -513,6 +515,12 @@ class MetalModelRunner:
         # cache profiling materialize weights. No-op on the single-stage path.
         if self.pp is not None:
             self.apply_pipeline_split(self.pp)
+        if self._is_pooling:
+            self._pooling_backend = build_decoder_pooling_backend(
+                self._forward_model,
+                self.model_config,
+                self.tokenizer,
+            )
         # Resolve the intermediate-forward capability once; unsupported
         # models keep the full-logits forward on every step.
         self._intermediate_forward_supported = (
@@ -714,11 +722,8 @@ class MetalModelRunner:
 
     def _dummy_forward_outputs(self, input_ids: mx.array) -> list[mx.array]:
         if self._is_pooling:
-            return pooling_dummy_forward_outputs(
-                self._forward_model,
-                input_ids,
-                model_config=self.model_config,
-            )
+            assert self._pooling_backend is not None
+            return [self._pooling_backend.forward_packed(input_ids, None)]
 
         if self.pp is not None and self.pp.size > 1:
             # Profile the PP stage shape: non-first stages never embed and
@@ -1222,11 +1227,10 @@ class MetalModelRunner:
                 else mx.array([all_token_ids], dtype=mx.int32)
             )
             if has_pooling_work:
-                pooling_hidden_states = forward_sequence_hidden_states(
-                    self._forward_model,
+                assert self._pooling_backend is not None
+                pooling_hidden_states = self._pooling_backend.forward_packed(
                     input_ids,
-                    cache=offset_caches,
-                    model_config=self.model_config,
+                    offset_caches,
                 )
             elif use_mm_forward:
                 model_output, mm_prefill_deltas = self._run_mm_paged_forward(
@@ -1432,15 +1436,20 @@ class MetalModelRunner:
         self._draft_token_ids = None
 
         if pooling_hidden_states is not None:
-            finish_paged_pooling_batch(
-                batch,
+            assert self._pooling_backend is not None
+            pooling_result = pool_paged_prefill_batch(
+                self._pooling_backend,
                 pooling_hidden_states,
+                batch.paged_prefill_entries,
                 cu_seqlens=cu_seqlens,
                 num_decode_segments=num_decode_segments,
-                model=self._forward_model,
-                tokenizer=self.tokenizer,
-                model_config=self.model_config,
             )
+            for entry, pooler_output in zip(
+                batch.paged_prefill_entries,
+                pooling_result.outputs,
+                strict=True,
+            ):
+                batch.set_output(entry.output_idx, [], None, pooler_output)
             return batch, scheduler_output
 
         if paged_state.intermediate_only:
@@ -2070,6 +2079,7 @@ class MetalModelRunner:
             validate_pooling_request(
                 new_req,
                 self.model_config,
+                backend=self._pooling_backend,
                 paged_attention_enabled=self._paged_attention_runtime is not None,
             )
 

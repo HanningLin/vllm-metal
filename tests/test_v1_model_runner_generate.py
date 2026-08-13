@@ -1674,10 +1674,11 @@ class TestV1MetalModelRunnerGDNSubmit:
             num_layers=0,
         )
         pooling_hidden_states = mx.array([[[1.0]]], dtype=mx.float32)
+        assert runner._pooling_backend is not None
         monkeypatch.setattr(
-            mr,
-            "forward_sequence_hidden_states",
-            lambda *args, **kwargs: pooling_hidden_states,
+            runner._pooling_backend,
+            "forward_packed",
+            lambda input_ids, offset_caches: pooling_hidden_states,
         )
         monkeypatch.setattr(mr.mx, "async_eval", lambda *args: submitted.append(args))
 
