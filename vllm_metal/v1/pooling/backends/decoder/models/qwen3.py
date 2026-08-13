@@ -16,7 +16,6 @@ from vllm_metal.pytorch_backend.tensor_bridge import mlx_to_torch
 from vllm_metal.v1.pooling.contract import CLASSIFY_TASK, DecoderPoolingSpan
 from vllm_metal.v1.pooling.validation import PoolingConfigView
 
-CLASSIFY_POOLER_TASKS = (None, CLASSIFY_TASK)
 QWEN3_RERANKER_TOKENS = ("no", "yes")
 
 
@@ -43,15 +42,12 @@ class Qwen3RerankerPooler:
         self.config = PoolingConfigView(model_config)
         self.tokenizer = tokenizer
         self.sequence_model = sequence_model
-        self.classifier_tokens = self._classifier_tokens()
+        self.classifier_tokens = self.config.qwen3_classifier_tokens
         self.classifier_head = self._classifier_head()
 
     def is_supported(self) -> bool:
         return (
-            self.config.is_text_only
-            and self.config.task in CLASSIFY_POOLER_TASKS
-            and self.config.uses_last_pooling
-            and not self.config.chunked_processing_enabled
+            self.config.supports_qwen3_reranker_config
             and self._is_qwen3_reranker()
             and self.classifier_head is not None
         )
@@ -126,8 +122,7 @@ class Qwen3RerankerPooler:
     def _is_qwen3_reranker(self) -> bool:
         return (
             "Qwen3ForSequenceClassification" in self.config.architectures
-            and getattr(self.config.hf_config, "is_original_qwen3_reranker", False)
-            is True
+            and self.config.is_original_qwen3_reranker
             and self.classifier_tokens == QWEN3_RERANKER_TOKENS
         )
 
@@ -204,9 +199,3 @@ class Qwen3RerankerPooler:
         if pooling_params.use_activation is not None:
             return pooling_params.use_activation
         return self.config.pooler_config.use_activation is not False
-
-    def _classifier_tokens(self) -> tuple[str, str] | None:
-        tokens = getattr(self.config.hf_config, "classifier_from_token", None)
-        if not isinstance(tokens, (list, tuple)) or len(tokens) != 2:
-            return None
-        return (str(tokens[0]), str(tokens[1]))

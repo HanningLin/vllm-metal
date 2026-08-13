@@ -44,6 +44,8 @@ class PoolingBackend(Protocol):
 
 
 class DecoderPooler(Protocol):
+    """Task-specific strategy used by a decoder pooling backend."""
+
     task: PoolingTask
 
     def is_supported(self) -> bool: ...

@@ -8,7 +8,7 @@ reranker ``classify`` scoring.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, NoReturn
 
 import mlx.core as mx
 import torch
@@ -26,8 +26,6 @@ from vllm_metal.v1.pooling.contract import (
     PoolingCapabilities,
 )
 from vllm_metal.v1.pooling.validation import PoolingConfigView
-
-EMBED_POOLER_TASKS = (None, EMBED_TASK)
 
 
 class DecoderModelView:
@@ -71,11 +69,7 @@ class LastTokenEmbeddingPooler:
 
     def is_supported(self) -> bool:
         return (
-            self.config.is_text_only
-            and self.config.task in EMBED_POOLER_TASKS
-            and self.config.uses_last_pooling
-            and self.config.embed_activation_allowed
-            and not self.config.chunked_processing_enabled
+            self.config.supports_decoder_embed_config
             and self.model_view.has_sequence_model
             and self._is_decoder_embedding()
         )
@@ -146,20 +140,18 @@ class MetalDecoderPoolingBackend:
         )
 
     def supported_tasks(self) -> tuple[PoolingTask, ...]:
-        return tuple(pooler.task for pooler in self.poolers if pooler.is_supported())
+        return tuple(
+            dict.fromkeys(
+                pooler.task for pooler in self.poolers if pooler.is_supported()
+            )
+        )
 
     def validate_params(self, pooling_params: PoolingParams) -> None:
         task = pooling_params.task or EMBED_TASK
-        for pooler in self.poolers:
-            if task == pooler.task:
-                pooler.validate_params(pooling_params)
-                return
-        raise NotImplementedError(
-            "Metal pooling supports only text-only task='embed' and the "
-            "Qwen3 reranker task='classify' for now; "
-            f"got task={pooling_params.task!r} for model="
-            f"{self.config.label}."
-        )
+        pooler = self._pooler_for_task(task)
+        if pooler is None:
+            self._raise_unsupported_task(pooling_params.task)
+        pooler.validate_params(pooling_params)
 
     def forward_packed(
         self,
@@ -194,14 +186,23 @@ class MetalDecoderPoolingBackend:
         span: DecoderPoolingSpan,
     ) -> torch.Tensor:
         task = span.pooling_params.task or EMBED_TASK
+        pooler = self._pooler_for_task(task)
+        if pooler is None:
+            self._raise_unsupported_task(span.pooling_params.task)
+        pooler.validate_params(span.pooling_params)
+        return pooler.pool_one(hidden_states, span)
+
+    def _pooler_for_task(self, task: PoolingTask) -> DecoderPooler | None:
         for pooler in self.poolers:
-            if task == pooler.task and pooler.is_supported():
-                return pooler.pool_one(hidden_states, span)
+            if task == pooler.task:
+                return pooler
+        return None
+
+    def _raise_unsupported_task(self, task: PoolingTask | None) -> NoReturn:
         raise NotImplementedError(
             "Metal pooling supports only text-only task='embed' and the "
             "Qwen3 reranker task='classify' for now; "
-            f"got task={span.pooling_params.task!r} for model="
-            f"{self.config.label}."
+            f"got task={task!r} for model={self.config.label}."
         )
 
 
