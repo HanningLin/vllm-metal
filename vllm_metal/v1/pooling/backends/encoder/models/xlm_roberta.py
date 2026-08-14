@@ -10,6 +10,7 @@ from typing import Any
 
 import mlx.core as mx
 import mlx.nn as nn
+import torch
 from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
 
@@ -245,7 +246,8 @@ def load_xlm_roberta_backend(
     model_config: Any,
 ) -> tuple[Any, Any, dict[str, Any], MetalEncoderPoolingBackend]:
     hf_config = model_config.hf_config
-    if model_config.quantization is not None:
+    config = hf_config.to_dict()
+    if model_config.quantization is not None or config.get("quantization") is not None:
         raise NotImplementedError(
             "Metal XLM-R encoder pooling does not support quantization yet."
         )
@@ -258,28 +260,11 @@ def load_xlm_roberta_backend(
             "Metal XLM-R encoder pooling supports only GELU activation."
         )
 
-    model_path = Path(model_config.model)
-    if not model_path.exists():
-        model_path = Path(
-            snapshot_download(
-                repo_id=model_config.model,
-                revision=model_config.revision,
-            )
-        )
-
-    weight_files = sorted(model_path.glob("model*.safetensors"))
-    if not weight_files:
-        weight_files = sorted(model_path.glob("*.safetensors"))
-    if not weight_files:
-        raise FileNotFoundError(f"No safetensors found in {model_path}.")
-
-    config = hf_config.to_dict()
     target_dtype = TORCH_TO_MLX_DTYPE[model_config.dtype]
     args = XLMRobertaArgs.from_config(config)
     model = XLMRobertaModel(args)
-    weights: dict[str, mx.array] = {}
-    for weight_file in weight_files:
-        weights.update(mx.load(str(weight_file)))
+    model_path = encoder_model_path(model_config)
+    weights = load_encoder_weights(model_path)
     weights = model.sanitize(weights)
     weights = {
         name: value.astype(target_dtype)
@@ -300,3 +285,41 @@ def load_xlm_roberta_backend(
         model,
     )
     return model, tokenizer, asdict(args), pooling_backend
+
+
+def encoder_model_path(model_config: Any) -> Path:
+    model_path = Path(model_config.model)
+    if model_path.exists():
+        return model_path
+    return Path(
+        snapshot_download(
+            repo_id=model_config.model,
+            revision=model_config.revision,
+        )
+    )
+
+
+def load_encoder_weights(model_path: Path) -> dict[str, mx.array]:
+    weight_files = sorted(model_path.glob("model*.safetensors"))
+    if not weight_files:
+        weight_files = sorted(model_path.glob("*.safetensors"))
+    if not weight_files:
+        weight_files = sorted(model_path.glob("pytorch_model*.bin"))
+    if not weight_files:
+        raise FileNotFoundError(f"No supported encoder weights found in {model_path}.")
+
+    weights: dict[str, mx.array] = {}
+    for weight_file in weight_files:
+        weights.update(load_encoder_weight_file(weight_file))
+    return weights
+
+
+def load_encoder_weight_file(weight_file: Path) -> dict[str, mx.array]:
+    if weight_file.suffix == ".bin":
+        state_dict = torch.load(weight_file, map_location="cpu", weights_only=True)
+        return {
+            name: mx.array(value.detach().cpu().numpy())
+            for name, value in state_dict.items()
+            if isinstance(value, torch.Tensor)
+        }
+    return mx.load(str(weight_file))
