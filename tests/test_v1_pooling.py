@@ -248,6 +248,22 @@ def _bge_m3_model_config(**overrides):
     return _pooling_model_config(**values)
 
 
+def _tiny_xlm_roberta_config() -> TorchXLMRobertaConfig:
+    return TorchXLMRobertaConfig(
+        vocab_size=17,
+        hidden_size=8,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        intermediate_size=16,
+        max_position_embeddings=16,
+        type_vocab_size=1,
+        layer_norm_eps=1e-5,
+        pad_token_id=1,
+        hidden_act="gelu",
+        position_embedding_type="absolute",
+    )
+
+
 def _make_runner(
     *,
     paged: bool = True,
@@ -652,19 +668,7 @@ class TestMetalPoolingCapabilities:
         tmp_path,
     ) -> None:
         torch.manual_seed(0)
-        torch_config = TorchXLMRobertaConfig(
-            vocab_size=17,
-            hidden_size=8,
-            num_hidden_layers=1,
-            num_attention_heads=2,
-            intermediate_size=16,
-            max_position_embeddings=16,
-            type_vocab_size=1,
-            layer_norm_eps=1e-5,
-            pad_token_id=1,
-            hidden_act="gelu",
-            position_embedding_type="absolute",
-        )
+        torch_config = _tiny_xlm_roberta_config()
         transformers_model = TorchXLMRobertaModel(torch_config).eval()
         transformers_model.save_pretrained(tmp_path, safe_serialization=True)
 
@@ -748,19 +752,7 @@ class TestMetalPoolingCapabilities:
 
     def test_bge_m3_dense_pooling_uses_encoder_backbone(self, tmp_path) -> None:
         torch.manual_seed(0)
-        torch_config = TorchXLMRobertaConfig(
-            vocab_size=17,
-            hidden_size=8,
-            num_hidden_layers=1,
-            num_attention_heads=2,
-            intermediate_size=16,
-            max_position_embeddings=16,
-            type_vocab_size=1,
-            layer_norm_eps=1e-5,
-            pad_token_id=1,
-            hidden_act="gelu",
-            position_embedding_type="absolute",
-        )
+        torch_config = _tiny_xlm_roberta_config()
         transformers_model = TorchXLMRobertaModel(torch_config).eval()
         transformers_model.save_pretrained(tmp_path, safe_serialization=True)
         torch_config.architectures = ["BgeM3EmbeddingModel"]
