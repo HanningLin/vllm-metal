@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Protocol, TypeAlias
+from typing import Any, Literal, Protocol, TypeAlias
 
 import mlx.core as mx
 import torch
@@ -97,6 +97,14 @@ class EncoderPoolingBackend(PoolingBackend, Protocol):
         scheduler_output: SchedulerOutput,
         model_config: object,
     ) -> tuple[EncoderPoolingOutput, ...]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class LoadedEncoderBackend:
+    model: Any
+    tokenizer: Any
+    model_args: dict[str, Any]
+    pooling_backend: EncoderPoolingBackend
 
 
 ExecutablePoolingBackend: TypeAlias = DecoderPoolingBackend | EncoderPoolingBackend

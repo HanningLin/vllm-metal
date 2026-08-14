@@ -28,7 +28,6 @@ from vllm_metal.multimodal import MultiModalFeatureSpec, PlaceholderRange  # noq
 from vllm_metal.pytorch_backend.tensor_bridge import mlx_to_torch  # noqa: E402
 from vllm_metal.v1 import model_runner as mr  # noqa: E402
 from vllm_metal.v1.model_lifecycle import (  # noqa: E402
-    LoadedEncoderPoolingModel,
     LoadedGenerationModel,
     ModelLifecycle,
 )
@@ -50,6 +49,7 @@ from vllm_metal.v1.pooling.backends.encoder.runtime import (  # noqa: E402
 )
 from vllm_metal.v1.pooling.contract import (  # noqa: E402
     DecoderPoolingSpan,
+    LoadedEncoderBackend,
     PoolingCapabilities,
 )
 from vllm_metal.v1.pooling.validation import PoolingConfigView  # noqa: E402
@@ -705,7 +705,7 @@ class TestMetalPoolingCapabilities:
         )
         lifecycle = ModelLifecycle(runner, runner._model_adapter)
         runner._model_lifecycle = lifecycle
-        loaded = LoadedEncoderPoolingModel(
+        loaded = LoadedEncoderBackend(
             model=SimpleNamespace(config=SimpleNamespace(vocab_size=16)),
             tokenizer=object(),
             model_args={"vocab_size": 16},
@@ -766,9 +766,7 @@ class TestMetalPoolingCapabilities:
             "AutoTokenizer.from_pretrained",
             return_value=object(),
         ) as load_tokenizer:
-            mlx_model, _, model_args, pooling_backend = load_xlm_roberta_backend(
-                model_config
-            )
+            loaded_backend = load_xlm_roberta_backend(model_config)
 
         input_ids = torch.tensor(
             [
@@ -784,7 +782,7 @@ class TestMetalPoolingCapabilities:
                 attention_mask=attention_mask,
             ).last_hidden_state
 
-        actual_hidden = mlx_model(
+        actual_hidden = loaded_backend.model(
             mx.array(input_ids.numpy(), dtype=mx.int32),
             mx.array(attention_mask.numpy(), dtype=mx.int32),
         )
@@ -793,7 +791,7 @@ class TestMetalPoolingCapabilities:
             device="cpu",
         )
 
-        assert model_args["hidden_size"] == torch_config.hidden_size
+        assert loaded_backend.model_args["hidden_size"] == torch_config.hidden_size
         assert torch.allclose(
             actual_hidden_torch,
             expected_hidden,
@@ -802,7 +800,7 @@ class TestMetalPoolingCapabilities:
         )
 
         request = _new_req("req-0", [0, 5, 6, 2], task="embed")
-        outputs = pooling_backend.pool_scheduler_output(
+        outputs = loaded_backend.pooling_backend.pool_scheduler_output(
             _scheduler_output(new_reqs=[request]),
             model_config,
         )
@@ -850,7 +848,7 @@ class TestMetalPoolingCapabilities:
             "AutoTokenizer.from_pretrained",
             return_value=object(),
         ):
-            _, _, _, pooling_backend = load_encoder_pooling_backend(model_config)
+            loaded_backend = load_encoder_pooling_backend(model_config)
 
         input_ids = torch.tensor([[0, 5, 6, 2]], dtype=torch.long)
         attention_mask = (input_ids != torch_config.pad_token_id).to(torch.long)
@@ -861,7 +859,7 @@ class TestMetalPoolingCapabilities:
             ).last_hidden_state
         request = _new_req("req-0", input_ids[0].tolist(), task="embed")
 
-        outputs = pooling_backend.pool_scheduler_output(
+        outputs = loaded_backend.pooling_backend.pool_scheduler_output(
             _scheduler_output(new_reqs=[request]),
             model_config,
         )
@@ -893,7 +891,7 @@ class TestMetalPoolingCapabilities:
             "AutoTokenizer.from_pretrained",
             return_value=object(),
         ):
-            _, _, _, pooling_backend = load_encoder_pooling_backend(model_config)
+            loaded_backend = load_encoder_pooling_backend(model_config)
 
         input_ids = torch.tensor([[0, 5, 6, 2]], dtype=torch.long)
         attention_mask = (input_ids != torch_config.pad_token_id).to(torch.long)
@@ -912,7 +910,7 @@ class TestMetalPoolingCapabilities:
                 requires_token_ids=True,
             ),
         )
-        outputs = pooling_backend.pool_scheduler_output(
+        outputs = loaded_backend.pooling_backend.pool_scheduler_output(
             _scheduler_output(new_reqs=[request]),
             model_config,
         )
@@ -939,7 +937,7 @@ class TestMetalPoolingCapabilities:
             hf_config=hf_config,
             dtype=torch.float16,
         )
-        _, tokenizer, _, pooling_backend = load_encoder_pooling_backend(model_config)
+        loaded_backend = load_encoder_pooling_backend(model_config)
         sentences_1 = ["What is BGE M3?", "Definition of BM25"]
         sentences_2 = [
             "BGE M3 is an embedding model supporting dense retrieval, "
@@ -950,13 +948,23 @@ class TestMetalPoolingCapabilities:
 
         embeddings_1 = torch.stack(
             [
-                _pool_real_bge(pooling_backend, model_config, tokenizer, sentence)
+                _pool_real_bge(
+                    loaded_backend.pooling_backend,
+                    model_config,
+                    loaded_backend.tokenizer,
+                    sentence,
+                )
                 for sentence in sentences_1
             ]
         )
         embeddings_2 = torch.stack(
             [
-                _pool_real_bge(pooling_backend, model_config, tokenizer, sentence)
+                _pool_real_bge(
+                    loaded_backend.pooling_backend,
+                    model_config,
+                    loaded_backend.tokenizer,
+                    sentence,
+                )
                 for sentence in sentences_2
             ]
         )
@@ -969,9 +977,9 @@ class TestMetalPoolingCapabilities:
             atol=0.01,
         )
         assert _real_bge_lexical_score(
-            pooling_backend,
+            loaded_backend.pooling_backend,
             model_config,
-            tokenizer,
+            loaded_backend.tokenizer,
             sentences_1[0],
             sentences_2[0],
         ) == pytest.approx(0.19554901123046875, rel=0.01)

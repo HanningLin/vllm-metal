@@ -16,6 +16,7 @@ from transformers import AutoTokenizer
 
 from vllm_metal.pytorch_backend.tensor_bridge import TORCH_TO_MLX_DTYPE
 from vllm_metal.v1.pooling.backends.encoder.runtime import MetalEncoderPoolingBackend
+from vllm_metal.v1.pooling.contract import LoadedEncoderBackend
 from vllm_metal.v1.pooling.validation import PoolingConfigView
 
 _MODEL_TYPES = frozenset({"xlm-roberta", "roberta"})
@@ -244,7 +245,7 @@ def supports_xlm_roberta_encoder(model_config: Any) -> bool:
 
 def load_xlm_roberta_backend(
     model_config: Any,
-) -> tuple[Any, Any, dict[str, Any], MetalEncoderPoolingBackend]:
+) -> LoadedEncoderBackend:
     hf_config = model_config.hf_config
     config = hf_config.to_dict()
     if model_config.quantization is not None or config.get("quantization") is not None:
@@ -284,7 +285,12 @@ def load_xlm_roberta_backend(
         PoolingConfigView(model_config),
         model,
     )
-    return model, tokenizer, asdict(args), pooling_backend
+    return LoadedEncoderBackend(
+        model=model,
+        tokenizer=tokenizer,
+        model_args=asdict(args),
+        pooling_backend=pooling_backend,
+    )
 
 
 def encoder_model_path(model_config: Any) -> Path:

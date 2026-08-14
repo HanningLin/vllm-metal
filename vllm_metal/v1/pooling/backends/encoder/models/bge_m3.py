@@ -29,7 +29,7 @@ from vllm_metal.v1.pooling.backends.encoder.runtime import (
 from vllm_metal.v1.pooling.contract import (
     EMBED_TASK,
     TOKEN_CLASSIFY_TASK,
-    EncoderPoolingBackend,
+    LoadedEncoderBackend,
 )
 from vllm_metal.v1.pooling.validation import PoolingConfigView
 
@@ -64,7 +64,10 @@ class BgeM3Pooler:
         if pooling_params.task in (None, EMBED_TASK):
             self.embedding_pooler.validate_params(pooling_params)
             return
-        if pooling_params.task == TOKEN_CLASSIFY_TASK and self._supports_token_classify():
+        if (
+            pooling_params.task == TOKEN_CLASSIFY_TASK
+            and self._supports_token_classify()
+        ):
             return
         raise NotImplementedError(
             "Metal BGE-M3 pooling supports only task='embed' or "
@@ -104,7 +107,9 @@ class BgeM3Pooler:
         tensor = mlx_to_torch(mx.contiguous(scores), device="cpu")
         tensor = tensor.detach().clone().squeeze(-1)
         start = 1 if request.token_ids[0] == self.bos_token_id else 0
-        end = -1 if request.token_ids[-1] == self.eos_token_id else len(request.token_ids)
+        end = (
+            -1 if request.token_ids[-1] == self.eos_token_id else len(request.token_ids)
+        )
         return tensor[start:end]
 
 
@@ -117,21 +122,26 @@ def supports_bge_m3_encoder(model_config: Any) -> bool:
 
 def load_bge_m3_backend(
     model_config: Any,
-) -> tuple[Any, Any, dict[str, Any], EncoderPoolingBackend]:
-    model, tokenizer, model_args, _ = load_xlm_roberta_backend(model_config)
+) -> LoadedEncoderBackend:
+    loaded_backbone = load_xlm_roberta_backend(model_config)
     model_path = encoder_model_path(model_config)
     config = PoolingConfigView(model_config)
     sparse_linear = load_sparse_linear(
         model_path,
-        int(model_args["hidden_size"]),
+        int(loaded_backbone.model_args["hidden_size"]),
         TORCH_TO_MLX_DTYPE[model_config.dtype],
     )
     pooling_backend = MetalEncoderPoolingBackend(
         config,
-        model,
+        loaded_backbone.model,
         BgeM3Pooler(config, sparse_linear),
     )
-    return model, tokenizer, model_args, pooling_backend
+    return LoadedEncoderBackend(
+        model=loaded_backbone.model,
+        tokenizer=loaded_backbone.tokenizer,
+        model_args=loaded_backbone.model_args,
+        pooling_backend=pooling_backend,
+    )
 
 
 def load_sparse_linear(
