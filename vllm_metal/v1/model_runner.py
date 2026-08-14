@@ -96,14 +96,12 @@ from vllm_metal.v1.model_adapter import (
     TargetModelForwardOutput,
 )
 from vllm_metal.v1.model_lifecycle import ModelLifecycle
-from vllm_metal.v1.pooling import (
-    finish_paged_pooling_batch,
-    forward_sequence_hidden_states,
-    has_paged_pooling_work,
-    pooling_dummy_forward_outputs,
-    supported_pooling_tasks,
-    validate_pooling_request,
+from vllm_metal.v1.pooling.contract import (
+    DecoderPoolingBackend,
+    DecoderPoolingBatch,
+    DecoderPoolingSpan,
 )
+from vllm_metal.v1.pooling.validation import validate_pooling_request
 from vllm_metal.v1.proposer import (
     Gemma4MTPProposer,
     MetalProposer,
@@ -257,6 +255,31 @@ class _ExecutionBatch:
         """Return whether this step has any paged execution work."""
         return bool(self.paged_prefill_entries or self.paged_decode_reqs)
 
+    def decoder_pooling_batch(
+        self,
+        cu_seqlens: list[int],
+        num_decode_segments: int,
+    ) -> DecoderPoolingBatch:
+        """Build decoder pooling spans for this step."""
+        spans: list[DecoderPoolingSpan] = []
+        for index, entry in enumerate(self.paged_prefill_entries):
+            pooling_params = entry.prefill.pooling_params
+            if pooling_params is None:
+                raise RuntimeError(
+                    "Paged pooling batch contained a non-pooling prefill request."
+                )
+            start = cu_seqlens[num_decode_segments + index]
+            end = cu_seqlens[num_decode_segments + index + 1]
+            spans.append(
+                DecoderPoolingSpan(
+                    start_row=start,
+                    num_tokens=end - start,
+                    is_complete=entry.result_mode != "intermediate",
+                    pooling_params=pooling_params,
+                )
+            )
+        return DecoderPoolingBatch(tuple(spans))
+
 
 class _PagedForwardState(NamedTuple):
     """State stashed by ``_start_paged_forward`` for ``_sample_paged_batch``."""
@@ -326,6 +349,7 @@ class MetalModelRunner:
         self._is_pooling: bool = (
             getattr(self.model_config, "runner_type", None) == "pooling"
         )
+        self._pooling_backend: DecoderPoolingBackend | None = None
         self._multimodal_adapter: MultimodalRuntimeAdapter | None = None
         self._gemma4_mtp_assistant: Gemma4MTPAssistantRuntime | None = None
         self._drafter: MetalProposer | None = None
@@ -499,12 +523,32 @@ class MetalModelRunner:
     def supported_worker_tasks(self) -> tuple[SupportedTask, ...]:
         """Return worker task capabilities for the loaded model."""
         if self._is_pooling:
-            if self._paged_attention_runtime is None:
+            backend = self._pooling_backend
+            if backend is None:
                 return ()
-            return supported_pooling_tasks(
-                self._forward_model, self.model_config, self.tokenizer
-            )
+            if (
+                backend.capabilities.requires_paged_attention
+                and self._paged_attention_runtime is None
+            ):
+                return ()
+            return backend.supported_tasks()
         return ("generate",)
+
+    def _has_paged_pooling_work(
+        self,
+        prefill_reqs: list[PrefillRequest],
+        decode_reqs: list[tuple[str, RequestState]],
+    ) -> bool:
+        pooling_prefills = [pr for pr in prefill_reqs if pr.pooling_params is not None]
+        has_pooling_work = bool(pooling_prefills)
+        if has_pooling_work and (
+            len(pooling_prefills) != len(prefill_reqs) or decode_reqs
+        ):
+            raise NotImplementedError(
+                "Metal pooling batches cannot mix pooling requests with "
+                "generation prefill/decode requests."
+            )
+        return has_pooling_work
 
     def load_model(self) -> None:
         """Load the configured model and derive runtime metadata."""
@@ -534,6 +578,8 @@ class MetalModelRunner:
             dtype=self.kv_cache_dtype or mx.float16,
             max_position_embeddings=max_position_embeddings,
         )
+        if self._is_pooling:
+            self._model_lifecycle.install_pooling_backend()
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self._lora.add_adapter(lora_request)
@@ -714,11 +760,8 @@ class MetalModelRunner:
 
     def _dummy_forward_outputs(self, input_ids: mx.array) -> list[mx.array]:
         if self._is_pooling:
-            return pooling_dummy_forward_outputs(
-                self._forward_model,
-                input_ids,
-                model_config=self.model_config,
-            )
+            assert self._pooling_backend is not None
+            return [self._pooling_backend.forward_packed(input_ids, None)]
 
         if self.pp is not None and self.pp.size > 1:
             # Profile the PP stage shape: non-first stages never embed and
@@ -1076,7 +1119,7 @@ class MetalModelRunner:
             self._paged_request_seq_lens,
         )
         num_decode_tokens = sum(segment.num_query_tokens for segment in decode_segments)
-        has_pooling_work = has_paged_pooling_work(prefill_reqs, decode_reqs)
+        has_pooling_work = self._has_paged_pooling_work(prefill_reqs, decode_reqs)
 
         # prompt_len=None marks an intermediate prefill chunk; only final
         # prefill rows can seed the next Gemma4 MTP draft step. Pooling batches
@@ -1222,11 +1265,10 @@ class MetalModelRunner:
                 else mx.array([all_token_ids], dtype=mx.int32)
             )
             if has_pooling_work:
-                pooling_hidden_states = forward_sequence_hidden_states(
-                    self._forward_model,
+                assert self._pooling_backend is not None
+                pooling_hidden_states = self._pooling_backend.forward_packed(
                     input_ids,
-                    cache=offset_caches,
-                    model_config=self.model_config,
+                    offset_caches,
                 )
             elif use_mm_forward:
                 model_output, mm_prefill_deltas = self._run_mm_paged_forward(
@@ -1432,15 +1474,22 @@ class MetalModelRunner:
         self._draft_token_ids = None
 
         if pooling_hidden_states is not None:
-            finish_paged_pooling_batch(
-                batch,
-                pooling_hidden_states,
-                cu_seqlens=cu_seqlens,
-                num_decode_segments=num_decode_segments,
-                model=self._forward_model,
-                tokenizer=self.tokenizer,
-                model_config=self.model_config,
+            assert self._pooling_backend is not None
+            mx.eval(pooling_hidden_states)
+            pooling_batch = batch.decoder_pooling_batch(
+                cu_seqlens,
+                num_decode_segments,
             )
+            pooler_outputs = self._pooling_backend.pool_packed(
+                pooling_hidden_states,
+                pooling_batch,
+            )
+            for entry, pooler_output in zip(
+                batch.paged_prefill_entries,
+                pooler_outputs,
+                strict=True,
+            ):
+                batch.set_output(entry.output_idx, [], None, pooler_output)
             return batch, scheduler_output
 
         if paged_state.intermediate_only:
@@ -2070,6 +2119,7 @@ class MetalModelRunner:
             validate_pooling_request(
                 new_req,
                 self.model_config,
+                backend=self._pooling_backend,
                 paged_attention_enabled=self._paged_attention_runtime is not None,
             )
 

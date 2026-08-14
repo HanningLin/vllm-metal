@@ -20,7 +20,22 @@ from tests.stub_runner import make_stub_runner  # noqa: E402
 from vllm_metal.attention.runtime.mha import MHAPagedAttentionRuntime  # noqa: E402
 from vllm_metal.multimodal import MultiModalFeatureSpec, PlaceholderRange  # noqa: E402
 from vllm_metal.v1 import model_runner as mr  # noqa: E402
-from vllm_metal.v1.pooling import pool_sequence_classification  # noqa: E402
+from vllm_metal.v1.model_lifecycle import (  # noqa: E402
+    LoadedGenerationModel,
+    ModelLifecycle,
+)
+from vllm_metal.v1.pooling.backends.decoder.models.qwen3 import (  # noqa: E402
+    Qwen3RerankerPooler,
+)
+from vllm_metal.v1.pooling.backends.decoder.runtime import (  # noqa: E402
+    DecoderModelView,
+    MetalDecoderPoolingBackend,
+)
+from vllm_metal.v1.pooling.contract import (  # noqa: E402
+    DecoderPoolingSpan,
+    PoolingCapabilities,
+)
+from vllm_metal.v1.pooling.validation import PoolingConfigView  # noqa: E402
 
 
 class _SequenceModel:
@@ -85,6 +100,12 @@ class _RecordingSequenceModel(_SequenceModel):
         return super().__call__(input_ids, cache=cache)
 
 
+class _NonArraySequenceModel:
+    def __call__(self, input_ids, cache=None):
+        del input_ids, cache
+        return object()
+
+
 class _PoolingModel:
     def __init__(self, sequence_model: object | None = None) -> None:
         self.model = sequence_model or _SequenceModel()
@@ -134,6 +155,11 @@ def _pooler_config(**overrides):
         "pooling_type": None,
         "seq_pooling_type": "LAST",
         "tok_pooling_type": "ALL",
+        "enable_chunked_processing": False,
+        "logit_mean": None,
+        "logit_sigma": None,
+        "use_activation": None,
+        "dimensions": None,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -145,8 +171,12 @@ def _pooling_model_config(**overrides):
         "multimodal_config": None,
         "served_model_name": "stub-pooling-model",
         "model": "stub-pooling-model",
+        "dtype": torch.float16,
         "hf_config": _hf_config(),
+        "is_multimodal_model": False,
         "pooler_config": _pooler_config(),
+        "quantization": None,
+        "trust_remote_code": False,
         "get_head_size": lambda: 128,
     }
     values.update(overrides)
@@ -408,12 +438,86 @@ class TestMetalPoolingCapabilities:
 
         assert runner.supported_worker_tasks() == ()
 
+    def test_supported_worker_tasks_uses_backend_paged_capability(self) -> None:
+        class _NoPagedBackend:
+            capabilities = PoolingCapabilities(requires_paged_attention=False)
+
+            def supported_tasks(self):
+                return ("embed",)
+
+            def validate_params(self, pooling_params):
+                del pooling_params
+
+        runner = _make_runner(paged=False)
+        runner._pooling_backend = _NoPagedBackend()
+
+        assert runner.supported_worker_tasks() == ("embed",)
+
     def test_supported_worker_tasks_preserves_generation(self) -> None:
         gen_runner = make_stub_runner(
             model_config=SimpleNamespace(runner_type="generate")
         )
 
         assert gen_runner.supported_worker_tasks() == ("generate",)
+
+    def test_load_model_installs_pooling_backend_after_lora_setup(self) -> None:
+        events: list[str] = []
+        runner = _make_runner()
+        runner._pooling_backend = None
+        lifecycle = ModelLifecycle(runner, runner._model_adapter)
+        runner._model_lifecycle = lifecycle
+        runner.metal_config = SimpleNamespace(use_paged_attention=True)
+        runner.scheduler_config = SimpleNamespace(
+            max_num_seqs=1,
+            max_num_batched_tokens=1,
+        )
+        runner.kv_cache_dtype = None
+        loaded = LoadedGenerationModel(
+            model=runner.model,
+            tokenizer=runner.tokenizer,
+            model_args={},
+        )
+
+        def setup_lora(**kwargs) -> None:
+            del kwargs
+            events.append("lora")
+            assert runner._pooling_backend is None
+
+        with (
+            patch.object(lifecycle, "_load_generation", return_value=loaded),
+            patch.object(lifecycle, "_install_generation_model"),
+            patch.object(lifecycle, "resolve_model_dims"),
+            patch.object(lifecycle, "_install_runtime_extensions"),
+        ):
+            runner._lora = SimpleNamespace(setup=setup_lora)
+            runner.load_model()
+
+        assert events == ["lora"]
+        assert runner._pooling_backend is not None
+        assert runner._pooling_backend.supported_tasks() == ("embed",)
+
+    def test_duplicate_supported_pooler_tasks_fail_at_backend_construction(
+        self,
+    ) -> None:
+        class _SupportedEmbedPooler:
+            task = "embed"
+
+            def is_supported(self) -> bool:
+                return True
+
+            def pool_one(self, hidden_states, span):
+                del hidden_states, span
+                return torch.zeros((1,), dtype=torch.float32)
+
+        config = PoolingConfigView(_pooling_model_config())
+        model_view = DecoderModelView(_PoolingModel())
+
+        with pytest.raises(RuntimeError, match="multiple supported poolers"):
+            MetalDecoderPoolingBackend(
+                config,
+                model_view,
+                (_SupportedEmbedPooler(), _SupportedEmbedPooler()),
+            )
 
 
 class TestMetalPoolingRunnerOutput:
@@ -571,7 +675,7 @@ class TestMetalPoolingFailFast:
         )
         req = _new_req("req-0", [1, 2], task="embed")
 
-        with pytest.raises(NotImplementedError, match="decoder-style checkpoint"):
+        with pytest.raises(NotImplementedError, match="task='embed'"):
             runner.execute_model(_scheduler_output(new_reqs=[req]))
 
     def test_pooling_requires_paged_attention(self) -> None:
@@ -592,26 +696,72 @@ class TestMetalPoolingFailFast:
         with pytest.raises(NotImplementedError, match="task"):
             runner.execute_model(_scheduler_output(new_reqs=[req]))
 
+    def test_incomplete_classify_contract_fails_before_forward(self) -> None:
+        runner = _make_runner(
+            model=_PoolingModel(_SequenceModel()),
+            model_config=_classification_model_config(),
+            tokenizer=_ClassifierTokenizer(),
+        )
+        req = _new_req("req-0", [1, 2], task="classify")
+
+        assert runner._pooling_backend is not None
+        with (
+            patch("vllm_metal.v1.model_runner.prepare_grouped") as prepare,
+            patch.object(runner._pooling_backend, "forward_packed") as forward,
+            pytest.raises(NotImplementedError, match="task='classify'"),
+        ):
+            runner.execute_model(_scheduler_output(new_reqs=[req]))
+
+        prepare.assert_not_called()
+        forward.assert_not_called()
+
+    def test_body_output_contract_fails_fast(self) -> None:
+        runner = _make_runner(model=_PoolingModel(_NonArraySequenceModel()))
+        req = _new_req("req-0", [1, 2])
+
+        with (
+            patch("vllm_metal.v1.model_runner.prepare_grouped"),
+            patch("vllm_metal.v1.model_runner.clear_context"),
+            pytest.raises(ValueError, match="expected MLX hidden states"),
+        ):
+            runner.execute_model(_scheduler_output(new_reqs=[req]))
+
     def test_classify_hidden_state_shape_fails_fast(self) -> None:
+        model = _PoolingModel(_ClassifierSequenceModel())
+        span = DecoderPoolingSpan(
+            start_row=0,
+            num_tokens=1,
+            is_complete=True,
+            pooling_params=_pooling_params(task="classify"),
+        )
         with pytest.raises(ValueError, match="hidden states with shape"):
-            pool_sequence_classification(
+            Qwen3RerankerPooler(
+                model,
+                model.model,
+                _classification_model_config(),
+                _ClassifierTokenizer(),
+            ).pool_one(
                 mx.array([[1.0, 2.0]], dtype=mx.float32),
-                token_index=0,
-                model=_PoolingModel(_ClassifierSequenceModel()),
-                tokenizer=_ClassifierTokenizer(),
-                pooling_params=_pooling_params(task="classify"),
-                model_config=_classification_model_config(),
+                span,
             )
 
     def test_classify_logits_shape_fails_fast(self) -> None:
+        model = _PoolingModel(_BadClassifierSequenceModel())
+        span = DecoderPoolingSpan(
+            start_row=0,
+            num_tokens=1,
+            is_complete=True,
+            pooling_params=_pooling_params(task="classify"),
+        )
         with pytest.raises(ValueError, match="classifier logits with shape"):
-            pool_sequence_classification(
+            Qwen3RerankerPooler(
+                model,
+                model.model,
+                _classification_model_config(),
+                _ClassifierTokenizer(),
+            ).pool_one(
                 mx.array([[[1.0, 2.0, 3.0]]], dtype=mx.float32),
-                token_index=0,
-                model=_PoolingModel(_BadClassifierSequenceModel()),
-                tokenizer=_ClassifierTokenizer(),
-                pooling_params=_pooling_params(task="classify"),
-                model_config=_classification_model_config(),
+                span,
             )
 
     @pytest.mark.parametrize(
@@ -648,11 +798,10 @@ class TestMetalPoolingFailFast:
             )
         ]
 
+        assert runner._pooling_backend is not None
         with (
             patch("vllm_metal.v1.model_runner.prepare_grouped") as prepare,
-            patch(
-                "vllm_metal.v1.model_runner.forward_sequence_hidden_states"
-            ) as forward,
+            patch.object(runner._pooling_backend, "forward_packed") as forward,
             pytest.raises(NotImplementedError, match="Multimodal pooling"),
         ):
             runner.execute_model(_scheduler_output(new_reqs=[req]))
@@ -666,11 +815,10 @@ class TestMetalPoolingFailFast:
         req = _new_req("req-0", [1, 2])
         req.prompt_embeds = torch.zeros((1, 2, 3), dtype=torch.float32)
 
+        assert runner._pooling_backend is not None
         with (
             patch("vllm_metal.v1.model_runner.prepare_grouped") as prepare,
-            patch(
-                "vllm_metal.v1.model_runner.forward_sequence_hidden_states"
-            ) as forward,
+            patch.object(runner._pooling_backend, "forward_packed") as forward,
             pytest.raises(NotImplementedError, match="Prompt-embedding pooling"),
         ):
             runner.execute_model(_scheduler_output(new_reqs=[req]))

@@ -14,6 +14,9 @@ from vllm_metal.v1.cache_policy import ModelCachePolicy
 from vllm_metal.v1.decode_pipeline import DecodePipeline
 from vllm_metal.v1.lora import MetalLoRARuntime
 from vllm_metal.v1.model_adapter import DefaultModelAdapter
+from vllm_metal.v1.pooling.backends.decoder.factory import (
+    build_decoder_pooling_backend,
+)
 from vllm_metal.v1.spec_decode import SpeculativeDecodeController
 from vllm_metal.v1.structured_output import MetalStructuredOutputApplier
 
@@ -48,6 +51,7 @@ def make_stub_runner(
             runner_type="generate", get_head_size=lambda: 128, max_model_len=2048
         ),
         "model": object(),
+        "tokenizer": None,
         "_is_vlm": False,
         "_multimodal_adapter": None,
         "_gemma4_mtp_assistant": None,
@@ -88,9 +92,18 @@ def make_stub_runner(
     if "_paged_block_size" in attrs and "_paged_group_block_sizes" not in attrs:
         runner._paged_scheduler_group_indices = (0,)
         runner._paged_group_block_sizes = (attrs["_paged_block_size"],)
+    runner_type = getattr(runner.model_config, "runner_type", None)
     if "_is_pooling" not in attrs:
-        runner._is_pooling = (
-            getattr(runner.model_config, "runner_type", None) == "pooling"
+        runner._is_pooling = runner_type == "pooling"
+    if "_pooling_backend" not in attrs:
+        runner._pooling_backend = (
+            build_decoder_pooling_backend(
+                runner._forward_model,
+                runner.model_config,
+                runner.tokenizer,
+            )
+            if runner_type == "pooling"
+            else None
         )
 
     runner._cache_policy = ModelCachePolicy(runner, runner._model_adapter)
