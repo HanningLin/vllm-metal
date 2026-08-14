@@ -30,15 +30,15 @@ from vllm_metal.v1.model_lifecycle import (  # noqa: E402
     LoadedGenerationModel,
     ModelLifecycle,
 )
-from vllm_metal.v1.pooling.backends.encoder.factory import (  # noqa: E402
-    load_encoder_pooling_backend,
-)
 from vllm_metal.v1.pooling.backends.decoder.models.qwen3 import (  # noqa: E402
     Qwen3RerankerPooler,
 )
 from vllm_metal.v1.pooling.backends.decoder.runtime import (  # noqa: E402
     DecoderModelView,
     MetalDecoderPoolingBackend,
+)
+from vllm_metal.v1.pooling.backends.encoder.factory import (  # noqa: E402
+    load_encoder_pooling_backend,
 )
 from vllm_metal.v1.pooling.backends.encoder.models.xlm_roberta import (  # noqa: E402
     load_xlm_roberta_backend,
