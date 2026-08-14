@@ -315,7 +315,7 @@ def load_encoder_weights(model_path: Path) -> dict[str, mx.array]:
 
 
 def load_encoder_weight_file(weight_file: Path) -> dict[str, mx.array]:
-    if weight_file.suffix == ".bin":
+    if weight_file.suffix in (".bin", ".pt"):
         state_dict = torch.load(weight_file, map_location="cpu", weights_only=True)
         return {
             name: mx.array(value.detach().cpu().numpy())
