@@ -30,6 +30,9 @@ from vllm_metal.v1.model_lifecycle import (  # noqa: E402
     LoadedGenerationModel,
     ModelLifecycle,
 )
+from vllm_metal.v1.pooling.backends.encoder.factory import (  # noqa: E402
+    load_encoder_pooling_backend,
+)
 from vllm_metal.v1.pooling.backends.decoder.models.qwen3 import (  # noqa: E402
     Qwen3RerankerPooler,
 )
@@ -225,6 +228,18 @@ def _encoder_model_config(**overrides):
     values = {
         "hf_config": _hf_config(
             architectures=["XLMRobertaModel"],
+            model_type="xlm-roberta",
+        ),
+        "pooler_config": _pooler_config(seq_pooling_type="CLS"),
+    }
+    values.update(overrides)
+    return _pooling_model_config(**values)
+
+
+def _bge_m3_model_config(**overrides):
+    values = {
+        "hf_config": _hf_config(
+            architectures=["BgeM3EmbeddingModel"],
             model_type="xlm-roberta",
         ),
         "pooler_config": _pooler_config(seq_pooling_type="CLS"),
@@ -730,6 +745,60 @@ class TestMetalPoolingCapabilities:
 
         with pytest.raises(NotImplementedError, match="quantization"):
             load_xlm_roberta_backend(model_config)
+
+    def test_bge_m3_dense_pooling_uses_encoder_backbone(self, tmp_path) -> None:
+        torch.manual_seed(0)
+        torch_config = TorchXLMRobertaConfig(
+            vocab_size=17,
+            hidden_size=8,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=16,
+            max_position_embeddings=16,
+            type_vocab_size=1,
+            layer_norm_eps=1e-5,
+            pad_token_id=1,
+            hidden_act="gelu",
+            position_embedding_type="absolute",
+        )
+        transformers_model = TorchXLMRobertaModel(torch_config).eval()
+        transformers_model.save_pretrained(tmp_path, safe_serialization=True)
+        torch_config.architectures = ["BgeM3EmbeddingModel"]
+        model_config = _bge_m3_model_config(
+            model=str(tmp_path),
+            tokenizer=str(tmp_path),
+            hf_config=torch_config,
+            dtype=torch.float32,
+        )
+
+        with patch(
+            "vllm_metal.v1.pooling.backends.encoder.models.xlm_roberta."
+            "AutoTokenizer.from_pretrained",
+            return_value=object(),
+        ):
+            _, _, _, pooling_backend = load_encoder_pooling_backend(model_config)
+
+        input_ids = torch.tensor([[0, 5, 6, 2]], dtype=torch.long)
+        attention_mask = (input_ids != torch_config.pad_token_id).to(torch.long)
+        with torch.no_grad():
+            expected_hidden = transformers_model(
+                input_ids,
+                attention_mask=attention_mask,
+            ).last_hidden_state
+        request = _new_req("req-0", input_ids[0].tolist(), task="embed")
+
+        outputs = pooling_backend.pool_scheduler_output(
+            _scheduler_output(new_reqs=[request]),
+            model_config,
+        )
+
+        assert len(outputs) == 1
+        assert torch.allclose(
+            outputs[0].pooler_output,
+            normalize(expected_hidden[0, 0].float(), dim=0),
+            atol=1e-5,
+            rtol=1e-5,
+        )
 
 
 class TestMetalPoolingRunnerOutput:
