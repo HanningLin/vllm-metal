@@ -13,6 +13,7 @@ from vllm.v1.core.sched.output import NewRequestData
 from vllm_metal.v1.pooling.contract import (
     CLASSIFY_TASK,
     EMBED_TASK,
+    TOKEN_CLASSIFY_TASK,
     PoolingBackend,
 )
 
@@ -142,7 +143,10 @@ class PoolingConfigView:
     def unsupported_pooling_option(self, pooling_params: PoolingParams) -> str | None:
         if pooling_params.late_interaction_params is not None:
             return "late-interaction parameters"
-        if pooling_params.requires_token_ids:
+        if (
+            pooling_params.requires_token_ids
+            and pooling_params.task != TOKEN_CLASSIFY_TASK
+        ):
             return "token-level ALL pooling outputs"
         if pooling_params.step_tag_id is not None:
             return "STEP pooling parameters"
@@ -151,7 +155,7 @@ class PoolingConfigView:
         if pooling_params.extra_kwargs:
             return "extra pooling kwargs"
         if (
-            pooling_params.task != CLASSIFY_TASK
+            pooling_params.task not in (CLASSIFY_TASK, TOKEN_CLASSIFY_TASK)
             and pooling_params.use_activation is False
         ):
             return "use_activation=False"

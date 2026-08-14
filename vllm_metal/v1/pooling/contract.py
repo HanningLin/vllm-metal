@@ -16,6 +16,7 @@ from vllm_metal.attention.context import OffsetCache
 
 EMBED_TASK: PoolingTask = "embed"
 CLASSIFY_TASK: PoolingTask = "classify"
+TOKEN_CLASSIFY_TASK: PoolingTask = "token_classify"
 PoolingExecutionKind: TypeAlias = Literal["decoder", "encoder"]
 
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Protocol
 
 import mlx.core as mx
 import torch
@@ -35,6 +36,63 @@ _ENCODER_POOLING_TYPES = (None, "CLS", "LAST")
 class EncoderPoolingRequest:
     req_id: str
     token_ids: tuple[int, ...]
+    pooling_params: PoolingParams
+
+
+class EncoderPooler(Protocol):
+    def supported_tasks(self) -> tuple[PoolingTask, ...]: ...
+
+    def validate_params(self, pooling_params: PoolingParams) -> None: ...
+
+    def pool_one(
+        self,
+        hidden_states: mx.array,
+        request: EncoderPoolingRequest,
+    ) -> torch.Tensor: ...
+
+
+class EncoderEmbeddingPooler:
+    def __init__(self, config: PoolingConfigView) -> None:
+        self.config = config
+
+    def supported_tasks(self) -> tuple[PoolingTask, ...]:
+        if self._supports_embed():
+            return (EMBED_TASK,)
+        return ()
+
+    def validate_params(self, pooling_params: PoolingParams) -> None:
+        if not self._supports_embed() or pooling_params.task not in (None, EMBED_TASK):
+            raise NotImplementedError(
+                "Metal encoder pooling supports only task='embed' "
+                f"for model={self.config.label}."
+            )
+
+    def pool_one(
+        self,
+        hidden_states: mx.array,
+        request: EncoderPoolingRequest,
+    ) -> torch.Tensor:
+        if not request.token_ids:
+            raise ValueError("Metal encoder pooling requires at least one token.")
+        token_index = (
+            0
+            if self.config.sequence_pooling_type != "LAST"
+            else len(request.token_ids) - 1
+        )
+        vector = hidden_states[0, token_index, :].astype(mx.float32)
+        norm = mx.sqrt(mx.sum(vector * vector))
+        norm = mx.maximum(norm, mx.array(_MIN_NORM, dtype=mx.float32))
+        tensor = mlx_to_torch(mx.contiguous(vector / norm), device="cpu")
+        return tensor.detach().clone()
+
+    def _supports_embed(self) -> bool:
+        return (
+            self.config.is_text_only
+            and self.config.task in (None, EMBED_TASK)
+            and self.config.sequence_pooling_type in _ENCODER_POOLING_TYPES
+            and self.config.embed_activation_allowed
+            and not self.config.chunked_processing_enabled
+        )
 
 
 class MetalEncoderPoolingBackend:
@@ -51,21 +109,17 @@ class MetalEncoderPoolingBackend:
         self,
         config: PoolingConfigView,
         forward: Callable[[mx.array, mx.array], mx.array],
+        pooler: EncoderPooler | None = None,
     ) -> None:
         self.config = config
         self._forward = forward
+        self._pooler = pooler or EncoderEmbeddingPooler(config)
 
     def supported_tasks(self) -> tuple[PoolingTask, ...]:
-        if self._supports_embed():
-            return (EMBED_TASK,)
-        return ()
+        return self._pooler.supported_tasks()
 
     def validate_params(self, pooling_params: PoolingParams) -> None:
-        if not self._supports_embed() or pooling_params.task not in (None, EMBED_TASK):
-            raise NotImplementedError(
-                "Metal encoder pooling supports only task='embed' "
-                f"for model={self.config.label}."
-            )
+        self._pooler.validate_params(pooling_params)
 
     def profile_forward(self, input_ids: mx.array) -> mx.array:
         attention_mask = mx.ones(input_ids.shape, dtype=mx.int32)
@@ -103,7 +157,7 @@ class MetalEncoderPoolingBackend:
         input_ids = mx.array([request.token_ids], dtype=mx.int32)
         attention_mask = mx.ones(input_ids.shape, dtype=mx.int32)
         hidden_states = self.forward_padded(input_ids, attention_mask)
-        return self._pool_one(hidden_states, 0, len(request.token_ids))
+        return self._pooler.pool_one(hidden_states, request)
 
     def _requests_from_scheduler_output(
         self,
@@ -123,10 +177,12 @@ class MetalEncoderPoolingBackend:
                 raise RuntimeError(
                     "Encoder pooling received a scheduled non-pooling request."
                 )
+            pooling_params = new_req.pooling_params
             requests.append(
                 EncoderPoolingRequest(
                     req_id=new_req.req_id,
                     token_ids=tuple(new_req.prompt_token_ids or ()),
+                    pooling_params=pooling_params,
                 )
             )
         return tuple(requests)
@@ -150,29 +206,3 @@ class MetalEncoderPoolingBackend:
                     "Metal encoder pooling requires full-prompt scheduling; "
                     "partial or chunked pooling requests are not supported yet."
                 )
-
-    def _supports_embed(self) -> bool:
-        return (
-            self.config.is_text_only
-            and self.config.task in (None, EMBED_TASK)
-            and self.config.sequence_pooling_type in _ENCODER_POOLING_TYPES
-            and self.config.embed_activation_allowed
-            and not self.config.chunked_processing_enabled
-        )
-
-    def _pool_one(
-        self,
-        hidden_states: mx.array,
-        row: int,
-        token_count: int,
-    ) -> torch.Tensor:
-        if token_count <= 0:
-            raise ValueError("Metal encoder pooling requires at least one token.")
-        token_index = (
-            0 if self.config.sequence_pooling_type != "LAST" else token_count - 1
-        )
-        vector = hidden_states[row, token_index, :].astype(mx.float32)
-        norm = mx.sqrt(mx.sum(vector * vector))
-        norm = mx.maximum(norm, mx.array(_MIN_NORM, dtype=mx.float32))
-        tensor = mlx_to_torch(mx.contiguous(vector / norm), device="cpu")
-        return tensor.detach().clone()
