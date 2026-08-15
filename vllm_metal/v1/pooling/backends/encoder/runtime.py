@@ -8,8 +8,6 @@ decoder KV cache, paged attention, or chunked request state.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Protocol
 
 import mlx.core as mx
 import torch
@@ -20,7 +18,9 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm_metal.pytorch_backend.tensor_bridge import mlx_to_torch
 from vllm_metal.v1.pooling.contract import (
     EMBED_TASK,
+    EncoderPooler,
     EncoderPoolingOutput,
+    EncoderPoolingRequest,
     PoolingCapabilities,
 )
 from vllm_metal.v1.pooling.validation import (
@@ -30,25 +30,6 @@ from vllm_metal.v1.pooling.validation import (
 
 _MIN_NORM = 1e-12
 _ENCODER_POOLING_TYPES = (None, "CLS", "LAST")
-
-
-@dataclass(frozen=True, slots=True)
-class EncoderPoolingRequest:
-    req_id: str
-    token_ids: tuple[int, ...]
-    pooling_params: PoolingParams
-
-
-class EncoderPooler(Protocol):
-    def supported_tasks(self) -> tuple[PoolingTask, ...]: ...
-
-    def validate_params(self, pooling_params: PoolingParams) -> None: ...
-
-    def pool_one(
-        self,
-        hidden_states: mx.array,
-        request: EncoderPoolingRequest,
-    ) -> torch.Tensor: ...
 
 
 class EncoderEmbeddingPooler:
@@ -72,6 +53,7 @@ class EncoderEmbeddingPooler:
         hidden_states: mx.array,
         request: EncoderPoolingRequest,
     ) -> torch.Tensor:
+        """Return one normalized CLS or LAST embedding for an encoder request."""
         if not request.token_ids:
             raise ValueError("Metal encoder pooling requires at least one token.")
         token_index = (

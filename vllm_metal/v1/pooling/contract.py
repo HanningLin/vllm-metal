@@ -42,9 +42,10 @@ class DecoderPoolingBatch:
 
 
 @dataclass(frozen=True, slots=True)
-class EncoderPoolingOutput:
+class EncoderPoolingRequest:
     req_id: str
-    pooler_output: torch.Tensor
+    token_ids: tuple[int, ...]
+    pooling_params: PoolingParams
 
 
 class PoolingBackend(Protocol):
@@ -85,6 +86,26 @@ class DecoderPoolingBackend(PoolingBackend, Protocol):
     ) -> tuple[torch.Tensor | None, ...]: ...
 
 
+@dataclass(frozen=True, slots=True)
+class EncoderPoolingOutput:
+    req_id: str
+    pooler_output: torch.Tensor
+
+
+class EncoderPooler(Protocol):
+    """Task-specific strategy used by an encoder pooling backend."""
+
+    def supported_tasks(self) -> tuple[PoolingTask, ...]: ...
+
+    def validate_params(self, pooling_params: PoolingParams) -> None: ...
+
+    def pool_one(
+        self,
+        hidden_states: mx.array,
+        request: EncoderPoolingRequest,
+    ) -> torch.Tensor: ...
+
+
 class EncoderPoolingBackend(PoolingBackend, Protocol):
     def forward_padded(
         self,
@@ -99,12 +120,12 @@ class EncoderPoolingBackend(PoolingBackend, Protocol):
     ) -> tuple[EncoderPoolingOutput, ...]: ...
 
 
+ExecutablePoolingBackend: TypeAlias = DecoderPoolingBackend | EncoderPoolingBackend
+
+
 @dataclass(frozen=True, slots=True)
 class LoadedEncoderBackend:
     model: Any
     tokenizer: Any
     model_args: dict[str, Any]
     pooling_backend: EncoderPoolingBackend
-
-
-ExecutablePoolingBackend: TypeAlias = DecoderPoolingBackend | EncoderPoolingBackend

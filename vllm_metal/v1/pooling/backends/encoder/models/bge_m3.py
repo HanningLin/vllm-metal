@@ -16,19 +16,21 @@ from vllm_metal.pytorch_backend.tensor_bridge import (
     TORCH_TO_MLX_DTYPE,
     mlx_to_torch,
 )
-from vllm_metal.v1.pooling.backends.encoder.models.xlm_roberta import (
+from vllm_metal.v1.pooling.backends.encoder.models.loading import (
     encoder_model_path,
     load_encoder_weight_file,
+)
+from vllm_metal.v1.pooling.backends.encoder.models.xlm_roberta import (
     load_xlm_roberta_backend,
 )
 from vllm_metal.v1.pooling.backends.encoder.runtime import (
     EncoderEmbeddingPooler,
-    EncoderPoolingRequest,
     MetalEncoderPoolingBackend,
 )
 from vllm_metal.v1.pooling.contract import (
     EMBED_TASK,
     TOKEN_CLASSIFY_TASK,
+    EncoderPoolingRequest,
     LoadedEncoderBackend,
 )
 from vllm_metal.v1.pooling.validation import PoolingConfigView
@@ -79,6 +81,7 @@ class BgeM3Pooler:
         hidden_states: mx.array,
         request: EncoderPoolingRequest,
     ) -> torch.Tensor:
+        """Dispatch one BGE-M3 request to dense embedding or sparse pooling."""
         if request.pooling_params.task == TOKEN_CLASSIFY_TASK:
             return self._pool_sparse(hidden_states, request)
         return self.embedding_pooler.pool_one(hidden_states, request)
@@ -96,6 +99,7 @@ class BgeM3Pooler:
         hidden_states: mx.array,
         request: EncoderPoolingRequest,
     ) -> torch.Tensor:
+        """Return sparse lexical scores after BOS/EOS filtering."""
         if not request.token_ids:
             raise ValueError("Metal BGE-M3 sparse pooling requires at least one token.")
 

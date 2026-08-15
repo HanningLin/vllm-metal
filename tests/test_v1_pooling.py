@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import os
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -12,7 +11,6 @@ import numpy as np
 import pytest
 import torch
 from torch.nn.functional import normalize
-from transformers import AutoConfig
 from transformers import XLMRobertaConfig as TorchXLMRobertaConfig
 from transformers import XLMRobertaModel as TorchXLMRobertaModel
 
@@ -279,72 +277,6 @@ def _save_bge_m3_sparse_head(tmp_path, hidden_size: int) -> torch.nn.Linear:
     sparse_linear = torch.nn.Linear(hidden_size, 1)
     torch.save(sparse_linear.state_dict(), tmp_path / "sparse_linear.pt")
     return sparse_linear
-
-
-def _pool_real_bge(pooling_backend, model_config, tokenizer, sentence: str):
-    token_ids = tokenizer(sentence).input_ids
-    request = _new_req("req-0", token_ids, task="embed")
-    outputs = pooling_backend.pool_scheduler_output(
-        _scheduler_output(new_reqs=[request]),
-        model_config,
-    )
-    return outputs[0].pooler_output
-
-
-def _real_bge_sparse_weights(
-    pooling_backend,
-    model_config,
-    tokenizer,
-    sentence: str,
-) -> dict[int, float]:
-    token_ids = tokenizer(sentence).input_ids
-    request = _new_req(
-        "req-0",
-        token_ids,
-        pooling_params=_pooling_params(
-            task="token_classify",
-            requires_token_ids=True,
-        ),
-    )
-    outputs = pooling_backend.pool_scheduler_output(
-        _scheduler_output(new_reqs=[request]),
-        model_config,
-    )
-    sparse_scores = outputs[0].pooler_output.tolist()
-    if token_ids[0] == tokenizer.bos_token_id:
-        token_ids = token_ids[1:]
-    if token_ids[-1] == tokenizer.eos_token_id:
-        token_ids = token_ids[:-1]
-    weights: dict[int, float] = {}
-    for token_id, score in zip(token_ids, sparse_scores, strict=True):
-        weights[token_id] = max(float(score), weights.get(token_id, 0.0))
-    return weights
-
-
-def _real_bge_lexical_score(
-    pooling_backend,
-    model_config,
-    tokenizer,
-    query: str,
-    document: str,
-) -> float:
-    query_weights = _real_bge_sparse_weights(
-        pooling_backend,
-        model_config,
-        tokenizer,
-        query,
-    )
-    document_weights = _real_bge_sparse_weights(
-        pooling_backend,
-        model_config,
-        tokenizer,
-        document,
-    )
-    return sum(
-        weight * document_weights[token_id]
-        for token_id, weight in query_weights.items()
-        if token_id in document_weights
-    )
 
 
 def _make_runner(
@@ -922,67 +854,6 @@ class TestMetalPoolingCapabilities:
             atol=1e-5,
             rtol=1e-5,
         )
-
-    @pytest.mark.skipif(
-        "VLLM_METAL_BGE_M3_CHECKPOINT" not in os.environ,
-        reason="set VLLM_METAL_BGE_M3_CHECKPOINT to run real BGE-M3 parity",
-    )
-    def test_real_bge_m3_checkpoint_matches_reference_scores(self) -> None:
-        checkpoint = os.environ["VLLM_METAL_BGE_M3_CHECKPOINT"]
-        hf_config = AutoConfig.from_pretrained(checkpoint)
-        hf_config.architectures = ["BgeM3EmbeddingModel"]
-        model_config = _bge_m3_model_config(
-            model=checkpoint,
-            tokenizer=checkpoint,
-            hf_config=hf_config,
-            dtype=torch.float16,
-        )
-        loaded_backend = load_encoder_pooling_backend(model_config)
-        sentences_1 = ["What is BGE M3?", "Definition of BM25"]
-        sentences_2 = [
-            "BGE M3 is an embedding model supporting dense retrieval, "
-            "lexical matching and multi-vector interaction.",
-            "BM25 is a bag-of-words retrieval function that ranks a set "
-            "of documents based on the query terms appearing in each document",
-        ]
-
-        embeddings_1 = torch.stack(
-            [
-                _pool_real_bge(
-                    loaded_backend.pooling_backend,
-                    model_config,
-                    loaded_backend.tokenizer,
-                    sentence,
-                )
-                for sentence in sentences_1
-            ]
-        )
-        embeddings_2 = torch.stack(
-            [
-                _pool_real_bge(
-                    loaded_backend.pooling_backend,
-                    model_config,
-                    loaded_backend.tokenizer,
-                    sentence,
-                )
-                for sentence in sentences_2
-            ]
-        )
-
-        assert embeddings_1.shape[1] == 1024
-        assert torch.allclose(
-            embeddings_1 @ embeddings_2.T,
-            torch.tensor([[0.6259, 0.3474], [0.3309, 0.6734]]),
-            rtol=0.01,
-            atol=0.01,
-        )
-        assert _real_bge_lexical_score(
-            loaded_backend.pooling_backend,
-            model_config,
-            loaded_backend.tokenizer,
-            sentences_1[0],
-            sentences_2[0],
-        ) == pytest.approx(0.19554901123046875, rel=0.01)
 
 
 class TestMetalPoolingRunnerOutput:

@@ -5,16 +5,17 @@ from __future__ import annotations
 
 import math
 from dataclasses import asdict, dataclass, fields
-from pathlib import Path
 from typing import Any
 
 import mlx.core as mx
 import mlx.nn as nn
-import torch
-from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
 
 from vllm_metal.pytorch_backend.tensor_bridge import TORCH_TO_MLX_DTYPE
+from vllm_metal.v1.pooling.backends.encoder.models.loading import (
+    encoder_model_path,
+    load_encoder_weights,
+)
 from vllm_metal.v1.pooling.backends.encoder.runtime import MetalEncoderPoolingBackend
 from vllm_metal.v1.pooling.contract import LoadedEncoderBackend
 from vllm_metal.v1.pooling.validation import PoolingConfigView
@@ -291,41 +292,3 @@ def load_xlm_roberta_backend(
         model_args=asdict(args),
         pooling_backend=pooling_backend,
     )
-
-
-def encoder_model_path(model_config: Any) -> Path:
-    model_path = Path(model_config.model)
-    if model_path.exists():
-        return model_path
-    return Path(
-        snapshot_download(
-            repo_id=model_config.model,
-            revision=model_config.revision,
-        )
-    )
-
-
-def load_encoder_weights(model_path: Path) -> dict[str, mx.array]:
-    weight_files = sorted(model_path.glob("model*.safetensors"))
-    if not weight_files:
-        weight_files = sorted(model_path.glob("*.safetensors"))
-    if not weight_files:
-        weight_files = sorted(model_path.glob("pytorch_model*.bin"))
-    if not weight_files:
-        raise FileNotFoundError(f"No supported encoder weights found in {model_path}.")
-
-    weights: dict[str, mx.array] = {}
-    for weight_file in weight_files:
-        weights.update(load_encoder_weight_file(weight_file))
-    return weights
-
-
-def load_encoder_weight_file(weight_file: Path) -> dict[str, mx.array]:
-    if weight_file.suffix in (".bin", ".pt"):
-        state_dict = torch.load(weight_file, map_location="cpu", weights_only=True)
-        return {
-            name: mx.array(value.detach().cpu().numpy())
-            for name, value in state_dict.items()
-            if isinstance(value, torch.Tensor)
-        }
-    return mx.load(str(weight_file))
