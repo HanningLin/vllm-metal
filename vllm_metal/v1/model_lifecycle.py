@@ -28,6 +28,11 @@ from vllm_metal.v1.model_adapter import ModelAdapter
 from vllm_metal.v1.pooling.backends.decoder.factory import (
     build_decoder_pooling_backend,
 )
+from vllm_metal.v1.pooling.backends.encoder.factory import (
+    load_encoder_pooling_backend,
+    supports_encoder_pooling_backend,
+)
+from vllm_metal.v1.pooling.contract import EncoderPoolingBackend
 
 # Engine-core subprocesses don't always re-invoke `vllm_metal._register()`,
 # so the compat patches applied there may be missing here. Reapply on import
@@ -115,6 +120,16 @@ class LoadedGenerationModel:
     model_args: dict[str, Any]
 
 
+@dataclass(frozen=True, slots=True)
+class LoadedEncoderPoolingModel:
+    """Loaded encoder model plus its pooling backend."""
+
+    model: Any
+    tokenizer: Any
+    model_args: dict[str, Any]
+    pooling_backend: EncoderPoolingBackend
+
+
 class ModelLifecycle:
     def __init__(
         self,
@@ -125,7 +140,12 @@ class ModelLifecycle:
         self._model_adapter = model_adapter
 
     def load(self) -> None:
-        """Load the generation model and install runner runtime state."""
+        """Load the configured model and install runner runtime state."""
+
+        loaded_encoder_model = self._load_encoder_pooling()
+        if loaded_encoder_model is not None:
+            self._install_encoder_pooling_model(loaded_encoder_model)
+            return
 
         request = GenerationLoadRequest.from_runner(self._runner, self._model_adapter)
         loaded_model = self._load_generation(request)
@@ -157,6 +177,32 @@ class ModelLifecycle:
         self._reject_pipeline_parallel_with_per_layer_metadata()
         self._install_hybrid_attention_dims(args)
 
+    def _load_encoder_pooling(self) -> LoadedEncoderPoolingModel | None:
+        runner = self._runner
+        if not runner._is_pooling or not supports_encoder_pooling_backend(
+            runner.model_config
+        ):
+            return None
+
+        if runner.pp is not None and runner.pp.size > 1:
+            raise NotImplementedError(
+                "Metal encoder pooling does not support pipeline parallelism yet."
+            )
+        if runner.vllm_config.lora_config is not None:
+            raise NotImplementedError(
+                "Metal encoder pooling does not support LoRA yet."
+            )
+
+        model, tokenizer, model_args, pooling_backend = load_encoder_pooling_backend(
+            runner.model_config
+        )
+        return LoadedEncoderPoolingModel(
+            model=model,
+            tokenizer=tokenizer,
+            model_args=model_args,
+            pooling_backend=pooling_backend,
+        )
+
     def _load_generation(
         self,
         request: GenerationLoadRequest,
@@ -175,6 +221,21 @@ class ModelLifecycle:
             tokenizer=tokenizer,
             model_args=self._extract_model_args(model, request.is_vlm),
         )
+
+    def _install_encoder_pooling_model(
+        self,
+        loaded_model: LoadedEncoderPoolingModel,
+    ) -> None:
+        runner = self._runner
+        runner.model = loaded_model.model
+        runner.tokenizer = loaded_model.tokenizer
+        runner._is_vlm = False
+        runner._multimodal_adapter = None
+        runner.encoder_cache = None
+        runner.model_args = loaded_model.model_args
+        runner._vocab_size = int(loaded_model.model_args["vocab_size"])
+        runner._pooling_backend = loaded_model.pooling_backend
+        logger.debug("Model args: %s", loaded_model.model_args)
 
     def _load_generation_model(
         self,
