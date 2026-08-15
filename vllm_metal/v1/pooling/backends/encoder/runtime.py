@@ -78,7 +78,7 @@ class EncoderEmbeddingPooler:
 
 
 class MetalEncoderPoolingBackend:
-    """Dense encoder embedding backend for full-prompt pooling."""
+    """Concrete EncoderPoolingBackend for full-prompt encoder pooling."""
 
     capabilities = PoolingCapabilities(
         execution_kind="encoder",
