@@ -41,6 +41,7 @@ class TestFindNonSsmBackend:
         assert isinstance(sizes[0], MultipleOf)
         assert sizes[0].base == 16
 
+
 class TestUpdateBlockSizeForBackend:
     """Test suite for update_block_size_for_backend() method."""
 
@@ -125,21 +126,30 @@ class TestUpdateBlockSizeForBackend:
 
         assert vllm_config.cache_config.block_size == 64
 
-    def test_non_hybrid_model_skipped(self, vllm_config):
-        """Test: Non-hybrid model skips Metal-specific adjustments.
+    def test_non_hybrid_model_uses_base_update_only(
+        self, vllm_config, stub_super_update, caplog, monkeypatch
+    ):
+        """Test: non-hybrid models delegate to vLLM without hybrid warning."""
+        import logging
 
-        Non-hybrid models use base implementation without Metal adjustments.
-        """
-        # Set model as non-hybrid
+        def _base_update(config):
+            config.cache_config.block_size = 64
+
+        stub_super_update.side_effect = _base_update
         vllm_config.model_config.is_hybrid = False
-        original_block_size = vllm_config.cache_config.block_size
+        monkeypatch.setattr(logging.getLogger("vllm_metal"), "propagate", True)
 
-        # Execute (should use base implementation only)
-        MetalPlatform.update_block_size_for_backend(vllm_config)
+        with patch("vllm_metal.config.get_config") as mock_get_config:
+            mock_metal_config = MagicMock()
+            mock_metal_config.use_paged_attention = True
+            mock_get_config.return_value = mock_metal_config
 
-        # For non-hybrid, base implementation may adjust block_size
-        # but Metal-specific paged attention adjustment should not apply
-        assert vllm_config.cache_config.block_size >= original_block_size
+            with caplog.at_level(logging.WARNING, logger="vllm_metal.platform"):
+                MetalPlatform.update_block_size_for_backend(vllm_config)
+
+        stub_super_update.assert_called_once_with(vllm_config)
+        assert vllm_config.cache_config.block_size == 64
+        assert "Hybrid model" not in caplog.text
 
     def test_model_config_none(self):
         """Test: None model_config returns early without error."""
