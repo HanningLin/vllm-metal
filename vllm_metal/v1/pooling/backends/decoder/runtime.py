@@ -114,7 +114,7 @@ class LastTokenEmbeddingPooler:
 
 
 class MetalDecoderPoolingBackend:
-    """Decoder pooling backend for current Metal text pooling behavior."""
+    """Concrete DecoderPoolingBackend for Metal decoder pooling."""
 
     capabilities = PoolingCapabilities(
         execution_kind="decoder",

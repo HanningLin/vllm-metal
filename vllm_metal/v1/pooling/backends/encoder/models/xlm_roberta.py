@@ -5,16 +5,19 @@ from __future__ import annotations
 
 import math
 from dataclasses import asdict, dataclass, fields
-from pathlib import Path
 from typing import Any
 
 import mlx.core as mx
 import mlx.nn as nn
-from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
 
 from vllm_metal.pytorch_backend.tensor_bridge import TORCH_TO_MLX_DTYPE
+from vllm_metal.v1.pooling.backends.encoder.models.loading import (
+    encoder_model_path,
+    load_encoder_weights,
+)
 from vllm_metal.v1.pooling.backends.encoder.runtime import MetalEncoderPoolingBackend
+from vllm_metal.v1.pooling.contract import LoadedEncoderBackend
 from vllm_metal.v1.pooling.validation import PoolingConfigView
 
 _MODEL_TYPES = frozenset({"xlm-roberta", "roberta"})
@@ -243,9 +246,10 @@ def supports_xlm_roberta_encoder(model_config: Any) -> bool:
 
 def load_xlm_roberta_backend(
     model_config: Any,
-) -> tuple[Any, Any, dict[str, Any], MetalEncoderPoolingBackend]:
+) -> LoadedEncoderBackend:
     hf_config = model_config.hf_config
-    if model_config.quantization is not None:
+    config = hf_config.to_dict()
+    if model_config.quantization is not None or config.get("quantization") is not None:
         raise NotImplementedError(
             "Metal XLM-R encoder pooling does not support quantization yet."
         )
@@ -258,28 +262,11 @@ def load_xlm_roberta_backend(
             "Metal XLM-R encoder pooling supports only GELU activation."
         )
 
-    model_path = Path(model_config.model)
-    if not model_path.exists():
-        model_path = Path(
-            snapshot_download(
-                repo_id=model_config.model,
-                revision=model_config.revision,
-            )
-        )
-
-    weight_files = sorted(model_path.glob("model*.safetensors"))
-    if not weight_files:
-        weight_files = sorted(model_path.glob("*.safetensors"))
-    if not weight_files:
-        raise FileNotFoundError(f"No safetensors found in {model_path}.")
-
-    config = hf_config.to_dict()
     target_dtype = TORCH_TO_MLX_DTYPE[model_config.dtype]
     args = XLMRobertaArgs.from_config(config)
     model = XLMRobertaModel(args)
-    weights: dict[str, mx.array] = {}
-    for weight_file in weight_files:
-        weights.update(mx.load(str(weight_file)))
+    model_path = encoder_model_path(model_config)
+    weights = load_encoder_weights(model_path)
     weights = model.sanitize(weights)
     weights = {
         name: value.astype(target_dtype)
@@ -299,4 +286,9 @@ def load_xlm_roberta_backend(
         PoolingConfigView(model_config),
         model,
     )
-    return model, tokenizer, asdict(args), pooling_backend
+    return LoadedEncoderBackend(
+        model=model,
+        tokenizer=tokenizer,
+        model_args=asdict(args),
+        pooling_backend=pooling_backend,
+    )

@@ -32,7 +32,7 @@ from vllm_metal.v1.pooling.backends.encoder.factory import (
     load_encoder_pooling_backend,
     supports_encoder_pooling_backend,
 )
-from vllm_metal.v1.pooling.contract import EncoderPoolingBackend
+from vllm_metal.v1.pooling.contract import LoadedEncoderBackend
 
 # Engine-core subprocesses don't always re-invoke `vllm_metal._register()`,
 # so the compat patches applied there may be missing here. Reapply on import
@@ -120,16 +120,6 @@ class LoadedGenerationModel:
     model_args: dict[str, Any]
 
 
-@dataclass(frozen=True, slots=True)
-class LoadedEncoderPoolingModel:
-    """Loaded encoder model plus its pooling backend."""
-
-    model: Any
-    tokenizer: Any
-    model_args: dict[str, Any]
-    pooling_backend: EncoderPoolingBackend
-
-
 class ModelLifecycle:
     def __init__(
         self,
@@ -177,7 +167,7 @@ class ModelLifecycle:
         self._reject_pipeline_parallel_with_per_layer_metadata()
         self._install_hybrid_attention_dims(args)
 
-    def _load_encoder_pooling(self) -> LoadedEncoderPoolingModel | None:
+    def _load_encoder_pooling(self) -> LoadedEncoderBackend | None:
         runner = self._runner
         if not runner._is_pooling or not supports_encoder_pooling_backend(
             runner.model_config
@@ -193,15 +183,7 @@ class ModelLifecycle:
                 "Metal encoder pooling does not support LoRA yet."
             )
 
-        model, tokenizer, model_args, pooling_backend = load_encoder_pooling_backend(
-            runner.model_config
-        )
-        return LoadedEncoderPoolingModel(
-            model=model,
-            tokenizer=tokenizer,
-            model_args=model_args,
-            pooling_backend=pooling_backend,
-        )
+        return load_encoder_pooling_backend(runner.model_config)
 
     def _load_generation(
         self,
@@ -224,7 +206,7 @@ class ModelLifecycle:
 
     def _install_encoder_pooling_model(
         self,
-        loaded_model: LoadedEncoderPoolingModel,
+        loaded_model: LoadedEncoderBackend,
     ) -> None:
         runner = self._runner
         runner.model = loaded_model.model
