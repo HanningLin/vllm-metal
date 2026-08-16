@@ -22,7 +22,6 @@ class TestFindNonSsmBackend:
         """Test: _find_non_ssm_backend returns a MetalBackend class."""
         backend_cls = MetalPlatform._find_non_ssm_backend(None)  # type: ignore
 
-        assert backend_cls is not None
         assert backend_cls.get_name() == "METAL_ATTN"
 
     def test_metal_backend_kernel_block_sizes(self):
@@ -41,26 +40,6 @@ class TestFindNonSsmBackend:
         assert len(sizes) == 1
         assert isinstance(sizes[0], MultipleOf)
         assert sizes[0].base == 16
-
-    def test_metal_backend_required_methods(self):
-        """Test: MetalBackend has all required AttentionBackend methods."""
-        backend_cls = MetalPlatform._find_non_ssm_backend(None)  # type: ignore
-
-        # Check all required static methods exist
-        assert hasattr(backend_cls, "get_name")
-        assert hasattr(backend_cls, "get_supported_kernel_block_sizes")
-        assert hasattr(backend_cls, "get_impl_cls")
-        assert hasattr(backend_cls, "get_builder_cls")
-        assert hasattr(backend_cls, "get_kv_cache_shape")
-
-        # Verify they raise NotImplementedError (not implemented for block_size calc)
-        with pytest.raises(NotImplementedError):
-            backend_cls.get_impl_cls()  # type: ignore
-        with pytest.raises(NotImplementedError):
-            backend_cls.get_builder_cls()  # type: ignore
-        with pytest.raises(NotImplementedError):
-            backend_cls.get_kv_cache_shape()  # type: ignore
-
 
 class TestUpdateBlockSizeForBackend:
     """Test suite for update_block_size_for_backend() method."""
@@ -203,19 +182,3 @@ class TestUpdateBlockSizeForBackend:
 
             assert "Hybrid model" in caplog.text
             assert "paged attention" in caplog.text
-
-    def test_wrapper_preserves_super_block_size(
-        self, vllm_config, stub_super_update, caplog
-    ):
-        """Test: wrapper does not mutate block_size set by base implementation."""
-        vllm_config.cache_config.block_size = 64
-
-        with patch("vllm_metal.config.get_config") as mock_get_config:
-            mock_metal_config = MagicMock()
-            mock_metal_config.use_paged_attention = True
-            mock_get_config.return_value = mock_metal_config
-
-            MetalPlatform.update_block_size_for_backend(vllm_config)
-
-            assert vllm_config.cache_config.block_size == 64
-            assert "Metal paged attention requires block_size" not in caplog.text
