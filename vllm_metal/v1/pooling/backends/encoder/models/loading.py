@@ -10,6 +10,8 @@ import mlx.core as mx
 import torch
 from huggingface_hub import snapshot_download
 
+from vllm_metal.pytorch_backend.tensor_bridge import torch_to_mlx
+
 _ENCODER_DOWNLOAD_PATTERNS = (
     "config.json",
     "model*.safetensors",
@@ -51,7 +53,7 @@ def load_encoder_weight_file(weight_file: Path) -> dict[str, mx.array]:
     if weight_file.suffix in (".bin", ".pt"):
         state_dict = torch.load(weight_file, map_location="cpu", weights_only=True)
         return {
-            name: mx.array(value.detach().cpu().numpy())
+            name: torch_to_mlx(value)
             for name, value in state_dict.items()
             if isinstance(value, torch.Tensor)
         }

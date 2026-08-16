@@ -39,6 +39,9 @@ from vllm_metal.v1.pooling.backends.decoder.runtime import (  # noqa: E402
 from vllm_metal.v1.pooling.backends.encoder.factory import (  # noqa: E402
     load_encoder_pooling_backend,
 )
+from vllm_metal.v1.pooling.backends.encoder.models.loading import (  # noqa: E402
+    load_encoder_weight_file,
+)
 from vllm_metal.v1.pooling.backends.encoder.models.xlm_roberta import (  # noqa: E402
     load_xlm_roberta_backend,
 )
@@ -760,6 +763,18 @@ class TestMetalPoolingCapabilities:
 
         with pytest.raises(NotImplementedError, match="quantization"):
             load_xlm_roberta_backend(model_config)
+
+    def test_encoder_torch_weight_loader_accepts_bfloat16(self, tmp_path) -> None:
+        weight_path = tmp_path / "pytorch_model.bin"
+        torch.save(
+            {"encoder.layer.weight": torch.ones((2, 2), dtype=torch.bfloat16)},
+            weight_path,
+        )
+
+        weights = load_encoder_weight_file(weight_path)
+
+        assert weights["encoder.layer.weight"].dtype == mx.bfloat16
+        assert weights["encoder.layer.weight"].shape == (2, 2)
 
     def test_bge_m3_dense_pooling_uses_encoder_backbone(self, tmp_path) -> None:
         torch.manual_seed(0)
