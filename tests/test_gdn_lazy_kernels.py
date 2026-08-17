@@ -168,6 +168,27 @@ class TestGDNPagedStateCache:
             np.array(pending_state), np.full((2, 1, 4, 32), 9)
         )
 
+    def test_recurrent_decode_view_drains_mismatched_pending_state(self) -> None:
+        # Arrange
+        cache = _make_state_cache(max_seqs=4)
+        initial_state = mx.arange(4 * 1 * 4 * 32, dtype=mx.float32).reshape(4, 1, 4, 32)
+        cache.recurrent_states[0] = mx.array(initial_state)
+        cache.set_pending_recurrent_state(
+            0, [3, 1], mx.full((2, 1, 4, 32), 7, dtype=mx.float32)
+        )
+
+        # Act
+        view = cache.recurrent_state_for_decode(0, [0, 2])
+
+        # Assert
+        assert not view.uses_compact_state
+        assert not cache.has_pending_recurrent_state(0)
+        mx.eval(view.state, view.state_slot_ids)
+        expected_state = np.array(initial_state)
+        expected_state[[3, 1]] = 7
+        np.testing.assert_array_equal(np.array(view.state), expected_state)
+        np.testing.assert_array_equal(np.array(view.state_slot_ids), [0, 2])
+
     def test_decode_state_view_owns_compact_slot_mapping(self) -> None:
         # Arrange
         cache = _make_state_cache(max_seqs=4, conv_kernel_dim=3, conv_dim=4)
@@ -779,9 +800,74 @@ class TestLazyRecurrentDecode:
         assert fake_kernel.grid == (32, 3, 4)
         assert fake_kernel.threadgroup == (32, 4, 1)
         assert fake_kernel.output_shapes == [(2, 2, 3), (2, 2, 3, 32)]
+        # Decode defers its compact update; draining it must land the new state
+        # on the active slots and leave every other slot untouched.
+        assert cache.pending_recurrent_state(0, slot_ids) is not None
+        cache.apply_pending_recurrent_state(0)
         mx.eval(cache.recurrent_states[0])
         expected_state = np.array(initial_state)
         expected_state[slot_ids] = 9
+        np.testing.assert_array_equal(
+            np.array(cache.recurrent_states[0]), expected_state
+        )
+
+    def test_consecutive_decodes_never_touch_the_stable_pool(self) -> None:
+        # Arrange
+        decode_kernel = _RecordingStateKernel(
+            mx.ones((2, 2, 3), dtype=mx.float32),
+            mx.full((2, 2, 3, 32), 7, dtype=mx.float32),
+            state_input_index=5,
+            slot_mapping_index=6,
+        )
+        cache = _make_state_cache(
+            max_seqs=4,
+            num_v_heads=2,
+            value_head_dim=3,
+            key_head_dim=32,
+        )
+        initial_state = mx.arange(4 * 2 * 3 * 32, dtype=mx.float32).reshape(4, 2, 3, 32)
+        cache.recurrent_states[0] = mx.array(initial_state)
+        slot_ids = [3, 1]
+        kernels = GDNLazyKernels(
+            enabled=True,
+            conv_kernel=_RaisingKernel(),
+            recurrent_decode_kernel=decode_kernel,
+        )
+        request = _recurrent_request(
+            q=mx.zeros((1, 2, 1, 32), dtype=mx.float32),
+            k=mx.zeros((1, 2, 1, 32), dtype=mx.float32),
+            v=mx.zeros((1, 2, 2, 3), dtype=mx.float32),
+            g=mx.zeros((1, 2, 2), dtype=mx.float32),
+            beta=mx.zeros((1, 2, 2), dtype=mx.float32),
+            cache=cache,
+            slot_ids=slot_ids,
+        )
+
+        # Act
+        for _ in range(2):
+            assert kernels.try_recurrent_decode(request) is not None
+
+        # Assert: each step fed the previous step's compact update straight
+        # back into the kernel, so the pool still holds its pre-decode bytes.
+        assert decode_kernel.state_input is not None
+        assert decode_kernel.state_input.shape == (2, 2, 3, 32)
+        mx.eval(
+            cache.recurrent_states[0],
+            decode_kernel.state_input,
+            decode_kernel.slot_mapping,
+        )
+        np.testing.assert_array_equal(
+            np.array(decode_kernel.state_input), np.full((2, 2, 3, 32), 7)
+        )
+        np.testing.assert_array_equal(np.array(decode_kernel.slot_mapping), [0, 1])
+        np.testing.assert_array_equal(
+            np.array(cache.recurrent_states[0]), np.array(initial_state)
+        )
+        # Draining once publishes the latest update to the active slots.
+        cache.apply_pending_recurrent_state(0)
+        mx.eval(cache.recurrent_states[0])
+        expected_state = np.array(initial_state)
+        expected_state[slot_ids] = 7
         np.testing.assert_array_equal(
             np.array(cache.recurrent_states[0]), expected_state
         )
@@ -866,6 +952,9 @@ class TestLazyRecurrentDecode:
 
         # Assert
         assert lazy_out is not None
+        # The lazy decode path parks its state update; drain it so the pool
+        # can be compared against the C++ oracle's in-place pool.
+        cache_lazy.apply_pending_recurrent_state(0)
         mx.eval(lazy_out, cache_lazy.recurrent_states[0])
 
         q_flat = mx.contiguous(q.reshape(total_tokens, n_hk, d_k))
@@ -1057,9 +1146,15 @@ class TestLazyRecurrentPrefill:
         # Assert
         assert prefill_out is not None
         assert decode_out is not None
-        assert cache.pending_recurrent_state(0, slot_ids) is None
+        # Decode consumed the prefill's compact update in place of the pool and
+        # replaced it with its own, so the pool is never touched in between.
+        pending = cache.pending_recurrent_state(0, slot_ids)
+        assert pending is not None
+        mx.eval(pending)
+        np.testing.assert_array_equal(np.array(pending), np.full((2, 2, 3, 32), 7))
         assert decode_kernel.state_input is not None
         assert decode_kernel.state_input.shape == (2, 2, 3, 32)
+        cache.apply_pending_recurrent_state(0)
         mx.eval(cache.recurrent_states[0], decode_kernel.slot_mapping)
         np.testing.assert_array_equal(np.array(decode_kernel.slot_mapping), [0, 1])
         expected_state = np.array(initial_state)
