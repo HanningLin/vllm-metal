@@ -43,7 +43,7 @@ _PLAIN_GGUF_TYPES = frozenset(
     }
 )
 _ALLOWED_WEIGHT_TYPES = frozenset(MLX_NATIVE_GGUF_TYPES) | _PLAIN_GGUF_TYPES
-_CONFIG_ALLOW_PATTERNS = ("config.json", "generation_config.json", "*.py")
+_CONFIG_ALLOW_PATTERNS = ("config.json", "generation_config.json")
 
 
 GGUFWrapper = GGUFLinear | GGUFEmbedding
