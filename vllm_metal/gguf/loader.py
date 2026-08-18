@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
+from huggingface_hub import snapshot_download
+
 try:
     import gguf
 except ImportError as exc:
@@ -41,6 +43,7 @@ _PLAIN_GGUF_TYPES = frozenset(
     }
 )
 _ALLOWED_WEIGHT_TYPES = frozenset(MLX_NATIVE_GGUF_TYPES) | _PLAIN_GGUF_TYPES
+_CONFIG_ALLOW_PATTERNS = ("config.json", "generation_config.json", "*.py")
 
 
 GGUFWrapper = GGUFLinear | GGUFEmbedding
@@ -85,7 +88,14 @@ class GGUFModelLoader:
     ) -> None:
         self._gguf_path = Path(gguf_path)
         self._config_dir = Path(config_dir)
-        self._tokenizer_dir = Path(tokenizer_dir or config_dir)
+        if not self._config_dir.exists() and not self._config_dir.is_absolute():
+            self._config_dir = Path(
+                snapshot_download(
+                    str(config_dir),
+                    allow_patterns=list(_CONFIG_ALLOW_PATTERNS),
+                )
+            )
+        self._tokenizer_dir = str(tokenizer_dir or config_dir)
         self._target_dtype = target_dtype
         self._tokenizer_config = dict(tokenizer_config or {})
 
