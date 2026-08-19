@@ -27,9 +27,9 @@ _THIS_DIR = Path(__file__).resolve().parent
 _KERNELS_V2_DIR = _THIS_DIR / "kernels_v2"
 
 # Cached after first get_ops() call.  By default both the .cpp extension and
-# the three Metal shader libraries are loaded prebuilt from the package (the
-# .so plus precompiled .metallib files), so there is no first-request shader
-# compile.  Set VLLM_METAL_BUILD_FROM_SOURCE=1 to recompile the .so from source
+# the required Metal shader libraries are loaded prebuilt from the package,
+# so there is no first-request shader compile. Set VLLM_METAL_BUILD_FROM_SOURCE=1
+# to recompile the .so from source
 # AND compile the shaders in-process from .metal (for kernel developers
 # iterating on paged_ops.cpp or the .metal sources); editing .metal then
 # requires restarting the interpreter to pick up changes.  Either way the
@@ -41,7 +41,7 @@ _ops_module: ModuleType | None = None
 def _read_metal_source(path: Path) -> str:
     """Read a .metal file and strip local #include directives.
 
-    Cached for the process lifetime: the three library source builders all pull
+    Cached for the process lifetime: the library source builders pull
     in shared shaders (e.g. utils.metal), so without this each staleness check
     or source-mode init would re-read and re-strip the same files several times.
     """
@@ -87,6 +87,48 @@ def _build_mla_paged_attention_source() -> str:
         _read_metal_source(_KERNELS_V2_DIR / "mla.metal"),
     ]
     return "\n".join(parts)
+
+
+def _build_nax_source() -> str:
+    """Read the self-contained NAX prefill attention source."""
+    return _read_metal_source(_KERNELS_V2_DIR / "pagedattention_nax.metal")
+
+
+def _try_init_nax_library(
+    mod: ModuleType,
+    *,
+    disabled: bool,
+    build_from_source: bool,
+    prebuilt_path: Path | None = None,
+) -> bool:
+    """Load optional NAX support, returning False when unavailable."""
+    if disabled:
+        logger.info("NAX prefill attention disabled by VLLM_METAL_DISABLE_NAX")
+        return False
+
+    try:
+        if not mod.nax_supported():
+            return False
+        if build_from_source:
+            mod.init_nax_library(_build_nax_source())
+        else:
+            if prebuilt_path is None or not prebuilt_path.exists():
+                logger.warning(
+                    "NAX prefill attention is supported on this machine, but "
+                    "the prebuilt library is missing at %s; using the non-NAX "
+                    "fallback",
+                    prebuilt_path or "<unknown path>",
+                )
+                return False
+            mod.init_nax_library_path(str(prebuilt_path))
+        return True
+    except (OSError, RuntimeError) as exc:
+        logger.warning(
+            "NAX prefill attention initialization failed; using the "
+            "non-NAX fallback: %s",
+            exc,
+        )
+        return False
 
 
 def metal_mla_paged_attention(
@@ -152,8 +194,8 @@ def metal_mla_paged_attention(
 def get_ops() -> ModuleType:
     """Import the native paged_ops extension and initialise its Metal libraries.
 
-    By default the prebuilt ``.so`` is loaded and the three precompiled
-    ``.metallib`` shader libraries are loaded by path via MLX
+    By default the prebuilt ``.so`` and required ``.metallib`` libraries are
+    loaded by path via MLX
     (``Device::get_library(name, path)``). When ``VLLM_METAL_BUILD_FROM_SOURCE``
     is set, the ``.so`` is rebuilt and the shader sources are read, pre-processed
     (includes inlined) and JIT-compiled in-process via
@@ -180,7 +222,8 @@ def get_ops() -> ModuleType:
     from vllm_metal import envs
     from vllm_metal.metal.build import build, output_path, stale_artifacts
 
-    if envs.VLLM_METAL_BUILD_FROM_SOURCE:
+    build_from_source = envs.VLLM_METAL_BUILD_FROM_SOURCE
+    if build_from_source:
         so_path = build()
     else:
         so_path = output_path()
@@ -213,17 +256,24 @@ def get_ops() -> ModuleType:
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
 
-    # 3. Initialise the three Metal shader libraries (v2 online-softmax, GDN
+    # 3. Initialise the required Metal shader libraries (v2 online-softmax, GDN
     #    linear attention, MLA paged attention).  By default we load the
     #    precompiled .metallib files shipped in the wheel (no first-request
     #    shader compile); only compile the shaders in-process when the developer
     #    opts in via VLLM_METAL_BUILD_FROM_SOURCE (no silent fallback).
-    if envs.VLLM_METAL_BUILD_FROM_SOURCE:
+    # NAX is optional: unsupported hardware, missing artifacts, and load
+    # failures retain the established dispatch path.
+    nax_prebuilt_path: Path | None = None
+    if build_from_source:
         mod.init_v2_library(_build_v2_paged_attention_source())
         mod.init_gdn_library(_build_gdn_source())
         mod.init_mla_library(_build_mla_paged_attention_source())
     else:
-        from vllm_metal.metal.build import METALLIB_NAMES, metallib_path
+        from vllm_metal.metal.build import (
+            METALLIB_NAMES,
+            NAX_METALLIB_NAME,
+            metallib_path,
+        )
 
         missing = [n for n in METALLIB_NAMES if not metallib_path(n).exists()]
         if missing:
@@ -234,6 +284,16 @@ def get_ops() -> ModuleType:
             )
         for name in METALLIB_NAMES:
             mod.init_library_path(name, str(metallib_path(name)))
+        nax_prebuilt_path = metallib_path(NAX_METALLIB_NAME)
+
+    nax_ready = _try_init_nax_library(
+        mod,
+        disabled=envs.VLLM_METAL_DISABLE_NAX,
+        build_from_source=build_from_source,
+        prebuilt_path=nax_prebuilt_path,
+    )
+    if nax_ready:
+        logger.info("NAX prefill attention kernels loaded (M5 tensor units)")
 
     _ops_module = mod
     logger.info("Native paged-attention Metal kernels loaded")
