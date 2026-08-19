@@ -18,11 +18,13 @@ import pickle
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import vllm.engine.arg_utils as arg_utils_module
 from vllm.engine.arg_utils import EngineArgs
 
+from vllm_metal.gguf import source as gguf_source
 from vllm_metal.gguf import vllm_integration
 from vllm_metal.gguf.vllm_integration import (
     GGUFEngineIntegration,
@@ -72,6 +74,18 @@ def gguf_file(tmp_path: Path) -> str:
 
 def _engine_args(**kwargs):
     return EngineArgs(**kwargs)
+
+
+def _remote_gguf_model_config(**overrides: object) -> SimpleNamespace:
+    values = {
+        "quantization": "gguf",
+        "model_weights": "Qwen/Qwen3-0.6B-GGUF:Q8_0",
+        "model": "Qwen/Qwen3-0.6B",
+        "tokenizer": None,
+        "revision": None,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
 
 
 def test_create_engine_config_routes_local_gguf(gguf_file, config_dir) -> None:
@@ -194,15 +208,25 @@ def test_non_gguf_model_is_untouched(config_dir) -> None:
     assert model_config.model_weights == ""
 
 
-def test_remote_gguf_reference_fails_fast() -> None:
-    with pytest.raises(ValueError) as exc_info:
-        _engine_args(
-            model="Qwen/Qwen3-0.6B-GGUF:Q8_0", tokenizer="Qwen/Qwen3-0.6B"
-        ).create_model_config()
-    assert str(exc_info.value) == (
-        "Remote GGUF references (repo_id:quant) are not supported yet by "
-        "vllm-metal; download the .gguf and pass its local path, with "
-        "--tokenizer pointing at the model's config/tokenizer directory."
+def test_create_model_config_routes_remote_gguf_reference(config_dir) -> None:
+    reference = "Qwen/Qwen3-0.6B-GGUF:Q8_0"
+
+    model_config = _engine_args(
+        model=reference, tokenizer=config_dir
+    ).create_model_config()
+
+    assert model_config.quantization == "gguf"
+    assert model_config.model == config_dir
+    assert model_config.model_weights == reference
+    assert model_config.served_model_name == reference
+
+
+def test_remote_gguf_reference_defaults_config_to_weights_repo() -> None:
+    assert (
+        GGUFEngineIntegration._resolve_config_source(
+            "Qwen/Qwen3-0.6B-GGUF:Q8_0", tokenizer=None, hf_config_path=None
+        )
+        == "Qwen/Qwen3-0.6B-GGUF"
     )
 
 
@@ -357,3 +381,77 @@ def test_remote_reference_grammar() -> None:
         assert GGUFEngineIntegration.is_remote_gguf_reference(ref), ref
     for ref in not_recognized:
         assert not GGUFEngineIntegration.is_remote_gguf_reference(ref), ref
+
+
+def test_remote_load_source_downloads_one_matching_gguf(tmp_path, monkeypatch) -> None:
+    snapshot_dir = tmp_path / "snapshot"
+    snapshot_dir.mkdir()
+    gguf_path = snapshot_dir / "Qwen3-0.6B-Q8_0.gguf"
+    gguf_path.write_text("dummy")
+    calls: list[dict[str, object]] = []
+
+    def fake_snapshot_download(**kwargs: object) -> str:
+        calls.append(kwargs)
+        return str(snapshot_dir)
+
+    monkeypatch.setattr(gguf_source, "snapshot_download", fake_snapshot_download)
+    load_config = SimpleNamespace(
+        download_dir=str(tmp_path / "cache"), ignore_patterns=["*.md"]
+    )
+    model_config = _remote_gguf_model_config(
+        tokenizer="Qwen/Qwen3-0.6B",
+        revision="rev-a",
+    )
+
+    source = gguf_source.GGUFLoadSource.from_model_config(model_config, load_config)
+
+    assert source is not None
+    assert source.weights_path == str(gguf_path)
+    assert source.config_dir == "Qwen/Qwen3-0.6B"
+    assert source.tokenizer_dir == "Qwen/Qwen3-0.6B"
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["repo_id"] == "Qwen/Qwen3-0.6B-GGUF"
+    assert call["cache_dir"] == str(tmp_path / "cache")
+    assert call["revision"] == "rev-a"
+    assert call["ignore_patterns"] == ["*.md"]
+    assert set(call["allow_patterns"]) == {
+        "*.Q8_0-*.gguf",
+        "*-Q8_0-*.gguf",
+        "*.Q8_0.gguf",
+        "*-Q8_0.gguf",
+        "*.q8_0-*.gguf",
+        "*-q8_0-*.gguf",
+        "*.q8_0.gguf",
+        "*-q8_0.gguf",
+    }
+
+
+@pytest.mark.parametrize(
+    ("filenames", "error"),
+    [
+        (
+            ["model-a-Q8_0.gguf", "model-b-Q8_0.gguf"],
+            "matched multiple files",
+        ),
+        (
+            ["model-Q8_0-00001-of-00002.gguf"],
+            "Remote sharded GGUF files",
+        ),
+    ],
+)
+def test_remote_load_source_rejects_unsupported_remote_matches(
+    tmp_path, monkeypatch, filenames, error
+) -> None:
+    snapshot_dir = tmp_path / "snapshot"
+    snapshot_dir.mkdir()
+    for filename in filenames:
+        (snapshot_dir / filename).write_text("dummy")
+    monkeypatch.setattr(
+        gguf_source,
+        "snapshot_download",
+        lambda **_: str(snapshot_dir),
+    )
+
+    with pytest.raises(ValueError, match=error):
+        gguf_source.GGUFLoadSource.from_model_config(_remote_gguf_model_config())
