@@ -2,6 +2,7 @@
 """Tests for Metal platform."""
 
 import importlib
+import os
 import platform
 import sys
 from types import ModuleType, SimpleNamespace
@@ -981,6 +982,7 @@ class TestMetalPlatform:
         """
         self._patch_stt_resolution(monkeypatch, is_stt=False)
         monkeypatch.setenv("VLLM_METAL_USE_PAGED_ATTENTION", "0")
+        monkeypatch.delenv("VLLM_HOST_IP", raising=False)
         reset_config()
         try:
             vllm_config = self._platform_config(
@@ -1023,6 +1025,7 @@ class TestMetalPlatform:
             )
             assert vllm_config.parallel_config.distributed_executor_backend == "uni"
             assert vllm_config.parallel_config.disable_custom_all_reduce is True
+            assert os.environ["VLLM_HOST_IP"] == "127.0.0.1"
         finally:
             reset_config()
 

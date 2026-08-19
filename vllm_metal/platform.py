@@ -2,6 +2,7 @@
 """Metal Platform implementation for vLLM."""
 
 import logging
+import os
 import platform as py_platform
 from typing import TYPE_CHECKING
 
@@ -410,6 +411,16 @@ class MetalPlatform(Platform):
             parallel_config.ray_runtime_env = RuntimeEnv(
                 **cls._ray_runtime_env_with_metal_hook(parallel_config.ray_runtime_env)
             )
+
+        # UniProc still initializes gloo locally.  Use loopback so upstream
+        # get_ip() cannot pick a VPN tunnel address that gloo cannot bind.
+        if (
+            parallel_config.distributed_executor_backend == "uni"
+            and parallel_config.world_size == 1
+            and parallel_config.data_parallel_size == 1
+            and "VLLM_HOST_IP" not in os.environ
+        ):
+            os.environ["VLLM_HOST_IP"] = "127.0.0.1"
 
         # Disable features not supported on Metal
         parallel_config.disable_custom_all_reduce = True
