@@ -9,7 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Self
 
-from huggingface_hub import snapshot_download
+from huggingface_hub import HfApi, snapshot_download
+from huggingface_hub.utils import filter_repo_objects
 
 _GGUF_SUFFIX = ".gguf"
 _REMOTE_REF_RE = re.compile(
@@ -23,6 +24,16 @@ _REMOTE_PREFIXES = ("*.", "*-")
 _REMOTE_SUFFIXES = ("-*", "")
 _REMOTE_SHARD_RE = re.compile(r"-\d+-of-\d+\.gguf$")
 _SUPPORTED_REMOTE_QTYPES = frozenset({"Q8_0", "Q4_0", "Q4_1"})
+_CONFIG_ALLOW_PATTERNS = ("config.json", "generation_config.json")
+_TOKENIZER_ALLOW_PATTERNS = (
+    "added_tokens.json",
+    "merges.txt",
+    "special_tokens_map.json",
+    "tokenizer.json",
+    "tokenizer.model",
+    "tokenizer_config.json",
+    "vocab.json",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +70,7 @@ class RemoteGGUFReference:
         cache_dir: str | None,
         revision: str | None,
         ignore_patterns: list[str] | str | None,
+        token: bool | str | None,
     ) -> str:
         if self.quant_type.upper() not in _SUPPORTED_REMOTE_QTYPES:
             supported = ", ".join(sorted(_SUPPORTED_REMOTE_QTYPES))
@@ -66,41 +78,47 @@ class RemoteGGUFReference:
                 f"Remote GGUF qtype {self.quant_type!r} is not supported by "
                 f"vllm-metal; supported qtypes: {supported}."
             )
+        repo_files = HfApi().list_repo_files(
+            repo_id=self.repo_id,
+            revision=revision,
+            token=token,
+        )
+        filename = self._select_single_filename(
+            sorted(
+                filter_repo_objects(
+                    repo_files,
+                    allow_patterns=list(self.allow_patterns),
+                    ignore_patterns=ignore_patterns,
+                )
+            )
+        )
         snapshot_dir = Path(
             snapshot_download(
                 repo_id=self.repo_id,
                 cache_dir=cache_dir,
-                allow_patterns=list(self.allow_patterns),
+                allow_patterns=[filename],
                 revision=revision,
-                ignore_patterns=ignore_patterns,
+                token=token,
             )
         )
-        return str(self._select_single_file(snapshot_dir))
+        return str(snapshot_dir / filename)
 
-    def _select_single_file(self, snapshot_dir: Path) -> Path:
-        matches = sorted(
-            {
-                match
-                for pattern in self.allow_patterns
-                for match in snapshot_dir.glob(pattern)
-                if match.is_file()
-            }
-        )
-        if not matches:
+    def _select_single_filename(self, filenames: list[str]) -> str:
+        if not filenames:
             raise ValueError(
                 f"No {self.quant_type!r} GGUF file found in remote repository "
                 f"{self.repo_id!r}."
             )
-        if any(_REMOTE_SHARD_RE.search(match.name) for match in matches):
+        if any(_REMOTE_SHARD_RE.search(filename) for filename in filenames):
             raise ValueError(
                 f"Remote sharded GGUF files are not supported yet: {self.value!r}."
             )
-        if len(matches) != 1:
-            names = ", ".join(match.name for match in matches)
+        if len(filenames) != 1:
+            names = ", ".join(filenames)
             raise ValueError(
                 f"Remote GGUF reference {self.value!r} matched multiple files: {names}."
             )
-        return matches[0]
+        return filenames[0]
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,15 +139,17 @@ class GGUFLoadSource:
             return None
 
         weights_ref = model_config.model_weights
+        cache_dir = None if load_config is None else load_config.download_dir
+        ignore_patterns = None if load_config is None else load_config.ignore_patterns
+        token = model_config.hf_token
         if cls.is_weights_path(weights_ref):
             weights_path = weights_ref
         elif remote_ref := RemoteGGUFReference.parse(weights_ref):
             weights_path = remote_ref.resolve(
-                cache_dir=None if load_config is None else load_config.download_dir,
+                cache_dir=cache_dir,
                 revision=model_config.revision,
-                ignore_patterns=(
-                    None if load_config is None else load_config.ignore_patterns
-                ),
+                ignore_patterns=ignore_patterns,
+                token=token,
             )
         else:
             raise ValueError(
@@ -137,13 +157,46 @@ class GGUFLoadSource:
                 f"repo_id:quant reference in model_weights; got {weights_ref!r}."
             )
 
-        config_dir = model_config.model
+        config_dir = cls._resolve_companion_source(
+            model_config.model,
+            cache_dir=cache_dir,
+            revision=model_config.revision,
+            token=token,
+            allow_patterns=_CONFIG_ALLOW_PATTERNS,
+        )
+        tokenizer_dir = cls._resolve_companion_source(
+            model_config.tokenizer or model_config.model,
+            cache_dir=cache_dir,
+            revision=model_config.tokenizer_revision or model_config.revision,
+            token=token,
+            allow_patterns=_TOKENIZER_ALLOW_PATTERNS,
+        )
         return cls(
             weights_path=weights_path,
             config_dir=config_dir,
-            tokenizer_dir=model_config.tokenizer or config_dir,
+            tokenizer_dir=tokenizer_dir,
         )
 
     @staticmethod
     def is_weights_path(value: str) -> bool:
         return value.endswith(_GGUF_SUFFIX)
+
+    @staticmethod
+    def _resolve_companion_source(
+        source: str,
+        *,
+        cache_dir: str | None,
+        revision: str | None,
+        token: bool | str | None,
+        allow_patterns: tuple[str, ...],
+    ) -> str:
+        source_path = Path(source)
+        if source_path.exists() or source_path.is_absolute():
+            return source
+        return snapshot_download(
+            repo_id=source,
+            cache_dir=cache_dir,
+            allow_patterns=list(allow_patterns),
+            revision=revision,
+            token=token,
+        )

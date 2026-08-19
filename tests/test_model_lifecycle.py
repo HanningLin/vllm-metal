@@ -51,6 +51,10 @@ def _runner_model_config(**overrides: object) -> object:
         "dtype": torch.float16,
         "quantization": None,
         "model_weights": "",
+        "hf_token": None,
+        "revision": None,
+        "tokenizer": None,
+        "tokenizer_revision": None,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -881,6 +885,7 @@ class TestModelLifecycle:
     def test_load_routes_gguf_to_owner_on_quantization_detection(
         self,
         monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
     ) -> None:
         """``quantization == "gguf"`` (set by the GGUF engine integration for a
         .gguf) delegates the whole load to ``GGUFModelLoader`` (lazily imported)
@@ -931,12 +936,16 @@ class TestModelLifecycle:
             SimpleNamespace(GGUFModelLoader=_StubGGUFLoader),
         )
         monkeypatch.setattr(model_lifecycle, "mlx_lm_load", _fake_mlx_lm_load)
+        config_dir = tmp_path / "config"
+        tokenizer_dir = tmp_path / "tokenizer"
+        config_dir.mkdir()
+        tokenizer_dir.mkdir()
 
         lifecycle, runner = _make_lifecycle(
             model_config=_runner_model_config(
-                model="config-dir",
+                model=str(config_dir),
                 quantization="gguf",
-                tokenizer="tokenizer-dir",
+                tokenizer=str(tokenizer_dir),
                 model_weights="stub-model.gguf",
             )
         )
@@ -951,8 +960,8 @@ class TestModelLifecycle:
         assert len(loader_calls) == 1
         call = loader_calls[0]
         assert call["gguf_path"] == "stub-model.gguf"
-        assert call["config_dir"] == "config-dir"
-        assert call["tokenizer_dir"] == "tokenizer-dir"
+        assert call["config_dir"] == str(config_dir)
+        assert call["tokenizer_dir"] == str(tokenizer_dir)
         assert call["target_dtype"] is not None, (
             "lifecycle must derive target_dtype from runner.model_config.dtype "
             "and thread it to the owner"

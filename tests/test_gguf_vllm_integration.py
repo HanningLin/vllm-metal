@@ -83,6 +83,8 @@ def _remote_gguf_model_config(**overrides: object) -> SimpleNamespace:
         "model": "Qwen/Qwen3-0.6B",
         "tokenizer": None,
         "revision": None,
+        "tokenizer_revision": None,
+        "hf_token": None,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -384,46 +386,88 @@ def test_remote_reference_grammar() -> None:
 
 
 def test_remote_load_source_downloads_one_matching_gguf(tmp_path, monkeypatch) -> None:
-    snapshot_dir = tmp_path / "snapshot"
-    snapshot_dir.mkdir()
-    gguf_path = snapshot_dir / "Qwen3-0.6B-Q8_0.gguf"
+    weight_snapshot = tmp_path / "weights"
+    config_snapshot = tmp_path / "config"
+    tokenizer_snapshot = tmp_path / "tokenizer"
+    for directory in (weight_snapshot, config_snapshot, tokenizer_snapshot):
+        directory.mkdir()
+    gguf_path = weight_snapshot / "Qwen3-0.6B-Q8_0.gguf"
     gguf_path.write_text("dummy")
+    list_calls: list[dict[str, object]] = []
     calls: list[dict[str, object]] = []
+
+    def fake_list_repo_files(**kwargs: object) -> list[str]:
+        list_calls.append(kwargs)
+        return ["README.md", gguf_path.name]
 
     def fake_snapshot_download(**kwargs: object) -> str:
         calls.append(kwargs)
-        return str(snapshot_dir)
+        if kwargs["repo_id"] == "Qwen/Qwen3-0.6B-GGUF":
+            return str(weight_snapshot)
+        if kwargs["repo_id"] == "Qwen/Qwen3-0.6B":
+            return str(config_snapshot)
+        if kwargs["repo_id"] == "Qwen/Qwen3-0.6B-Tokenizer":
+            return str(tokenizer_snapshot)
+        raise AssertionError(f"unexpected repo_id={kwargs['repo_id']!r}")
 
+    monkeypatch.setattr(
+        gguf_source,
+        "HfApi",
+        lambda: SimpleNamespace(list_repo_files=fake_list_repo_files),
+    )
     monkeypatch.setattr(gguf_source, "snapshot_download", fake_snapshot_download)
     load_config = SimpleNamespace(
         download_dir=str(tmp_path / "cache"), ignore_patterns=["*.md"]
     )
     model_config = _remote_gguf_model_config(
-        tokenizer="Qwen/Qwen3-0.6B",
+        tokenizer="Qwen/Qwen3-0.6B-Tokenizer",
         revision="rev-a",
+        tokenizer_revision="tok-rev",
+        hf_token="hf-token",
     )
 
     source = gguf_source.GGUFLoadSource.from_model_config(model_config, load_config)
 
     assert source is not None
     assert source.weights_path == str(gguf_path)
-    assert source.config_dir == "Qwen/Qwen3-0.6B"
-    assert source.tokenizer_dir == "Qwen/Qwen3-0.6B"
-    assert len(calls) == 1
-    call = calls[0]
-    assert call["repo_id"] == "Qwen/Qwen3-0.6B-GGUF"
-    assert call["cache_dir"] == str(tmp_path / "cache")
-    assert call["revision"] == "rev-a"
-    assert call["ignore_patterns"] == ["*.md"]
-    assert set(call["allow_patterns"]) == {
-        "*.Q8_0-*.gguf",
-        "*-Q8_0-*.gguf",
-        "*.Q8_0.gguf",
-        "*-Q8_0.gguf",
-        "*.q8_0-*.gguf",
-        "*-q8_0-*.gguf",
-        "*.q8_0.gguf",
-        "*-q8_0.gguf",
+    assert source.config_dir == str(config_snapshot)
+    assert source.tokenizer_dir == str(tokenizer_snapshot)
+    assert list_calls == [
+        {
+            "repo_id": "Qwen/Qwen3-0.6B-GGUF",
+            "revision": "rev-a",
+            "token": "hf-token",
+        }
+    ]
+    weight_call, config_call, tokenizer_call = calls
+    assert weight_call == {
+        "repo_id": "Qwen/Qwen3-0.6B-GGUF",
+        "cache_dir": str(tmp_path / "cache"),
+        "allow_patterns": [gguf_path.name],
+        "revision": "rev-a",
+        "token": "hf-token",
+    }
+    assert config_call == {
+        "repo_id": "Qwen/Qwen3-0.6B",
+        "cache_dir": str(tmp_path / "cache"),
+        "allow_patterns": ["config.json", "generation_config.json"],
+        "revision": "rev-a",
+        "token": "hf-token",
+    }
+    assert tokenizer_call == {
+        "repo_id": "Qwen/Qwen3-0.6B-Tokenizer",
+        "cache_dir": str(tmp_path / "cache"),
+        "allow_patterns": [
+            "added_tokens.json",
+            "merges.txt",
+            "special_tokens_map.json",
+            "tokenizer.json",
+            "tokenizer.model",
+            "tokenizer_config.json",
+            "vocab.json",
+        ],
+        "revision": "tok-rev",
+        "token": "hf-token",
     }
 
 
@@ -445,17 +489,17 @@ def test_remote_load_source_downloads_one_matching_gguf(tmp_path, monkeypatch) -
     ],
 )
 def test_remote_load_source_rejects_unsupported_remote_matches(
-    tmp_path, monkeypatch, filenames, error
+    monkeypatch, filenames, error
 ) -> None:
-    snapshot_dir = tmp_path / "snapshot"
-    snapshot_dir.mkdir()
-    for filename in filenames:
-        (snapshot_dir / filename).write_text("dummy")
+    def fail_snapshot_download(**_: object) -> str:
+        raise AssertionError("rejected remote GGUF reference must not download")
+
     monkeypatch.setattr(
         gguf_source,
-        "snapshot_download",
-        lambda **_: str(snapshot_dir),
+        "HfApi",
+        lambda: SimpleNamespace(list_repo_files=lambda **_: filenames),
     )
+    monkeypatch.setattr(gguf_source, "snapshot_download", fail_snapshot_download)
 
     with pytest.raises(ValueError, match=error):
         gguf_source.GGUFLoadSource.from_model_config(_remote_gguf_model_config())
@@ -464,9 +508,17 @@ def test_remote_load_source_rejects_unsupported_remote_matches(
 def test_remote_load_source_rejects_unsupported_qtype_before_download(
     monkeypatch,
 ) -> None:
+    def fail_list_repo_files(**_: object) -> list[str]:
+        raise AssertionError("unsupported remote qtype must not list files")
+
     def fail_snapshot_download(**_: object) -> str:
         raise AssertionError("unsupported remote qtype must not download")
 
+    monkeypatch.setattr(
+        gguf_source,
+        "HfApi",
+        lambda: SimpleNamespace(list_repo_files=fail_list_repo_files),
+    )
     monkeypatch.setattr(gguf_source, "snapshot_download", fail_snapshot_download)
 
     with pytest.raises(ValueError, match="Remote GGUF qtype 'Q4_K_M'"):
