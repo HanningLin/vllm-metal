@@ -233,6 +233,22 @@ class TestModelLifecycle:
         assert request.tokenizer_config == {"trust_remote_code": True}
         assert calls == [hf_config]
 
+    def test_effective_multimodal_gguf_is_rejected(self) -> None:
+        runner = make_stub_runner(
+            model_config=_runner_model_config(
+                hf_config=SimpleNamespace(model_type="custom_vlm"),
+                is_multimodal_model=True,
+                quantization="gguf",
+                model_weights="stub-model.gguf",
+            ),
+        )
+
+        with pytest.raises(NotImplementedError, match="Multimodal GGUF"):
+            GenerationLoadRequest.from_runner(
+                runner,
+                SimpleNamespace(should_force_text_backbone=lambda _: False),
+            )
+
     def test_model_load_request_marks_pipeline_stage_lazy(self) -> None:
         # A pipeline-parallel stage (pp.size > 1) loads weights lazily so it can
         # prune its non-owned layers before the first eval; a single-stage load

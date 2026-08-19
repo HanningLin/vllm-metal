@@ -22,6 +22,7 @@ _QUANT_TAG_RE = re.compile(
 _REMOTE_PREFIXES = ("*.", "*-")
 _REMOTE_SUFFIXES = ("-*", "")
 _REMOTE_SHARD_RE = re.compile(r"-\d+-of-\d+\.gguf$")
+_SUPPORTED_REMOTE_QTYPES = frozenset({"Q8_0", "Q4_0", "Q4_1"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +60,12 @@ class RemoteGGUFReference:
         revision: str | None,
         ignore_patterns: list[str] | str | None,
     ) -> str:
+        if self.quant_type.upper() not in _SUPPORTED_REMOTE_QTYPES:
+            supported = ", ".join(sorted(_SUPPORTED_REMOTE_QTYPES))
+            raise ValueError(
+                f"Remote GGUF qtype {self.quant_type!r} is not supported by "
+                f"vllm-metal; supported qtypes: {supported}."
+            )
         snapshot_dir = Path(
             snapshot_download(
                 repo_id=self.repo_id,

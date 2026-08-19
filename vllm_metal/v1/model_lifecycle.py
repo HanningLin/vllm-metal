@@ -88,6 +88,10 @@ class GenerationLoadRequest:
         is_vlm = bool(getattr(model_config, "is_multimodal_model", False))
         if model_adapter.should_force_text_backbone(hf_config):
             is_vlm = False
+        if is_vlm and model_config.quantization == "gguf":
+            raise NotImplementedError(
+                "Multimodal GGUF checkpoints are not supported by vllm-metal."
+            )
         gguf_source = (
             None
             if is_vlm

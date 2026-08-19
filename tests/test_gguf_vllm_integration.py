@@ -431,6 +431,10 @@ def test_remote_load_source_downloads_one_matching_gguf(tmp_path, monkeypatch) -
     ("filenames", "error"),
     [
         (
+            [],
+            "No 'Q8_0' GGUF file",
+        ),
+        (
             ["model-a-Q8_0.gguf", "model-b-Q8_0.gguf"],
             "matched multiple files",
         ),
@@ -455,3 +459,19 @@ def test_remote_load_source_rejects_unsupported_remote_matches(
 
     with pytest.raises(ValueError, match=error):
         gguf_source.GGUFLoadSource.from_model_config(_remote_gguf_model_config())
+
+
+def test_remote_load_source_rejects_unsupported_qtype_before_download(
+    monkeypatch,
+) -> None:
+    def fail_snapshot_download(**_: object) -> str:
+        raise AssertionError("unsupported remote qtype must not download")
+
+    monkeypatch.setattr(gguf_source, "snapshot_download", fail_snapshot_download)
+
+    with pytest.raises(ValueError, match="Remote GGUF qtype 'Q4_K_M'"):
+        gguf_source.GGUFLoadSource.from_model_config(
+            _remote_gguf_model_config(
+                model_weights="Qwen/Qwen3-0.6B-GGUF:Q4_K_M",
+            )
+        )
