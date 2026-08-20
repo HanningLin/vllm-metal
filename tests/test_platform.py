@@ -387,6 +387,25 @@ class TestMetalPlatform:
         with pytest.raises(NotImplementedError, match="single process"):
             MetalPlatform.check_and_update_config(vllm_config)
 
+    @pytest.mark.parametrize(
+        ("configured_ip", "expected_ip"),
+        [(None, "127.0.0.1"), ("192.0.2.1", "192.0.2.1")],
+    )
+    def test_check_and_update_config_sets_uniproc_host_ip(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        configured_ip: str | None,
+        expected_ip: str,
+    ) -> None:
+        if configured_ip is None:
+            monkeypatch.delenv("VLLM_HOST_IP", raising=False)
+        else:
+            monkeypatch.setenv("VLLM_HOST_IP", configured_ip)
+
+        MetalPlatform.check_and_update_config(self._platform_config())
+
+        assert os.environ["VLLM_HOST_IP"] == expected_ip
+
     def test_check_and_update_config_rejects_tensor_parallel(self) -> None:
         """Tensor parallelism is unsupported on Metal yet; reject it at config time."""
         vllm_config = self._platform_config(
@@ -982,7 +1001,6 @@ class TestMetalPlatform:
         """
         self._patch_stt_resolution(monkeypatch, is_stt=False)
         monkeypatch.setenv("VLLM_METAL_USE_PAGED_ATTENTION", "0")
-        monkeypatch.delenv("VLLM_HOST_IP", raising=False)
         reset_config()
         try:
             vllm_config = self._platform_config(
@@ -1025,7 +1043,6 @@ class TestMetalPlatform:
             )
             assert vllm_config.parallel_config.distributed_executor_backend == "uni"
             assert vllm_config.parallel_config.disable_custom_all_reduce is True
-            assert os.environ["VLLM_HOST_IP"] == "127.0.0.1"
         finally:
             reset_config()
 

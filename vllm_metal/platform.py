@@ -412,8 +412,10 @@ class MetalPlatform(Platform):
                 **cls._ray_runtime_env_with_metal_hook(parallel_config.ray_runtime_env)
             )
 
-        # UniProc still initializes gloo locally.  Use loopback so upstream
-        # get_ip() cannot pick a VPN tunnel address that gloo cannot bind.
+        # COMPAT(vLLM 0.27.1): UniProc uses get_ip() for its local gloo
+        # rendezvous. Use loopback so a VPN tunnel address cannot be selected.
+        # Remove after pinned vLLM includes vllm#50999, which uses a file://
+        # store for UniProc rendezvous.
         if (
             parallel_config.distributed_executor_backend == "uni"
             and parallel_config.world_size == 1
