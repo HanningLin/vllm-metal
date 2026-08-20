@@ -412,18 +412,6 @@ class MetalPlatform(Platform):
                 **cls._ray_runtime_env_with_metal_hook(parallel_config.ray_runtime_env)
             )
 
-        # COMPAT(vLLM 0.27.1): UniProc uses get_ip() for its local gloo
-        # rendezvous. Use loopback so a VPN tunnel address cannot be selected.
-        # Remove after pinned vLLM includes vllm#50999, which uses a file://
-        # store for UniProc rendezvous.
-        if (
-            parallel_config.distributed_executor_backend == "uni"
-            and parallel_config.world_size == 1
-            and parallel_config.data_parallel_size == 1
-            and "VLLM_HOST_IP" not in os.environ
-        ):
-            os.environ["VLLM_HOST_IP"] = "127.0.0.1"
-
         # Disable features not supported on Metal
         parallel_config.disable_custom_all_reduce = True
 
@@ -785,6 +773,18 @@ class MetalPlatform(Platform):
         # executor-level ray_runtime_env hook does not propagate on the DP path).
         if parallel_config.data_parallel_size > 1:
             cls._register_dp_ray_worker_setup_hook(parallel_config.ray_runtime_env)
+
+        # COMPAT(vLLM 0.27.1): UniProc uses get_ip() for its local gloo
+        # rendezvous. Use loopback so a VPN tunnel address cannot be selected.
+        # Remove after pinned vLLM includes vllm#50999, which uses a file://
+        # store for UniProc rendezvous.
+        if (
+            parallel_config.distributed_executor_backend == "uni"
+            and parallel_config.world_size == 1
+            and parallel_config.data_parallel_size == 1
+            and "VLLM_HOST_IP" not in os.environ
+        ):
+            os.environ["VLLM_HOST_IP"] = "127.0.0.1"
 
         # Log memory configuration
         total_mem = cls.get_device_total_memory()
