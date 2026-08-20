@@ -612,7 +612,7 @@ class TestModelLifecycle:
         lifecycle, runner = _make_lifecycle(
             model_config=_runner_model_config(),
         )
-        runner.vllm_config = SimpleNamespace(speculative_config=speculative_config)
+        runner.vllm_config.speculative_config = speculative_config
 
         lifecycle.load()
 
@@ -649,7 +649,7 @@ class TestModelLifecycle:
         lifecycle, runner = _make_lifecycle(
             model_config=_runner_model_config(),
         )
-        runner.vllm_config = SimpleNamespace(speculative_config=speculative_config)
+        runner.vllm_config.speculative_config = speculative_config
         runner._gemma4_mtp_assistant = object()
 
         with pytest.raises(RuntimeError, match="assistant load failed"):
