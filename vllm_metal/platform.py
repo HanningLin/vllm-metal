@@ -2,6 +2,7 @@
 """Metal Platform implementation for vLLM."""
 
 import logging
+import os
 import platform as py_platform
 from typing import TYPE_CHECKING
 
@@ -772,6 +773,18 @@ class MetalPlatform(Platform):
         # executor-level ray_runtime_env hook does not propagate on the DP path).
         if parallel_config.data_parallel_size > 1:
             cls._register_dp_ray_worker_setup_hook(parallel_config.ray_runtime_env)
+
+        # COMPAT(vLLM 0.27.1): UniProc uses get_ip() for its local gloo
+        # rendezvous. Use loopback so a VPN tunnel address cannot be selected.
+        # Remove after pinned vLLM includes vllm#50999, which uses a file://
+        # store for UniProc rendezvous.
+        if (
+            parallel_config.distributed_executor_backend == "uni"
+            and parallel_config.world_size == 1
+            and parallel_config.data_parallel_size == 1
+            and not os.environ.get("VLLM_HOST_IP")
+        ):
+            os.environ["VLLM_HOST_IP"] = "127.0.0.1"
 
         # Log memory configuration
         total_mem = cls.get_device_total_memory()
