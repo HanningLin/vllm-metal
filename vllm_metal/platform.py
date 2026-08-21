@@ -782,7 +782,7 @@ class MetalPlatform(Platform):
             parallel_config.distributed_executor_backend == "uni"
             and parallel_config.world_size == 1
             and parallel_config.data_parallel_size == 1
-            and "VLLM_HOST_IP" not in os.environ
+            and not os.environ.get("VLLM_HOST_IP")
         ):
             os.environ["VLLM_HOST_IP"] = "127.0.0.1"
 
