@@ -26,13 +26,14 @@ _REMOTE_SHARD_RE = re.compile(r"-\d+-of-\d+\.gguf$")
 _SUPPORTED_REMOTE_QTYPES = frozenset({"Q8_0", "Q4_0", "Q4_1"})
 _CONFIG_ALLOW_PATTERNS = ("config.json", "generation_config.json")
 _TOKENIZER_ALLOW_PATTERNS = (
-    "added_tokens.json",
-    "merges.txt",
-    "special_tokens_map.json",
-    "tokenizer.json",
+    "*.json",
+    "*.py",
     "tokenizer.model",
-    "tokenizer_config.json",
-    "vocab.json",
+    "*.tiktoken",
+    "tiktoken.model",
+    "*.txt",
+    "*.jsonl",
+    "*.jinja",
 )
 
 
