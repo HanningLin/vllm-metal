@@ -55,7 +55,7 @@ class MLXLoRAModelManager:
 
         self._registered: LRUCache[int, LoadedLoRA] = LRUCache(self.capacity)
         self._active: LRUCache[int, None] = LRUCache(self.lora_slots)
-        self._prepared: dict[int, _PreparedAdapterUpdate] = {}
+        self._pinned: set[int] = set()
         self.lora_index_to_id: list[int | None] = [None] * self.lora_slots
 
         self.modules: dict[str, _WrappedModule] = {}
@@ -130,40 +130,37 @@ class MLXLoRAModelManager:
             return False
 
         # Validate before eviction so a malformed new adapter cannot destroy a
-        # working cache entry. Prepared arrays do not depend on which slot they
-        # are ultimately committed into.
-        validation_slot = self._next_activation_slot()
-        prepared = self._prepare_adapter_update(adapter, validation_slot)
+        # working cache entry.
+        self._prepare_adapter_update(adapter, 0)
 
         if len(self._registered) >= self.capacity:
             evicted_id, _ = self._registered.popitem()
-            self._prepared.pop(evicted_id, None)
             self.deactivate_adapter(evicted_id)
         self._registered[adapter.lora_id] = adapter
-        self._prepared[adapter.lora_id] = prepared
         return True
 
     def replace_adapter(self, adapter: LoadedLoRA) -> None:
         lora_id = adapter.lora_id
         if lora_id not in self._registered:
             raise ValueError(f"LoRA adapter {lora_id} is not registered")
-        self._prepared.pop(lora_id, None)
 
         slot = self._slot_for_adapter(lora_id)
         if slot is None:
-            slot = self._next_activation_slot()
+            slot = 0
         prepared = self._prepare_adapter_update(adapter, slot)
 
         self._registered[lora_id] = adapter
         self._registered.touch(lora_id)
         if self._slot_for_adapter(lora_id) is None:
+            slot = self._next_activation_slot()
+            prepared = self._prepare_adapter_update(adapter, slot)
             self._activate_prepared(lora_id, slot, prepared)
         else:
             self._commit_adapter_update(lora_id, slot, prepared)
             self._active.touch(lora_id)
 
     def remove_adapter(self, lora_id: int) -> bool:
-        self._prepared.pop(lora_id, None)
+        self._pinned.discard(lora_id)
         self.deactivate_adapter(lora_id)
         return self._registered.pop(lora_id, None) is not None
 
@@ -172,7 +169,7 @@ class MLXLoRAModelManager:
             self.deactivate_adapter(lid)
         self._registered.clear()
         self._active.clear()
-        self._prepared.clear()
+        self._pinned.clear()
 
     def pin_adapter(self, lora_id: int) -> bool:
         """Pin an adapter in both the registered cache and resident slot cache."""
@@ -180,9 +177,13 @@ class MLXLoRAModelManager:
             raise ValueError(f"Pinning failed. LoRA {lora_id} is not registered.")
         if lora_id not in self._active:
             self.activate_adapter(lora_id)
+        self._pinned.add(lora_id)
         self._registered.pin(lora_id)
         self._active.pin(lora_id)
         return True
+
+    def is_pinned(self, lora_id: int) -> bool:
+        return lora_id in self._pinned
 
     def list_adapters(self) -> set[int]:
         return set(self._registered)
@@ -196,9 +197,7 @@ class MLXLoRAModelManager:
             return False
         adapter = self._registered[lora_id]
         slot = self._next_activation_slot()
-        prepared = self._prepared.pop(lora_id, None)
-        if prepared is None:
-            prepared = self._prepare_adapter_update(adapter, slot)
+        prepared = self._prepare_adapter_update(adapter, slot)
         self._activate_prepared(lora_id, slot, prepared)
         logger.info(
             "Activated LoRA %d in slot %d (%d modules)",
@@ -282,6 +281,8 @@ class MLXLoRAModelManager:
             self.deactivate_adapter(resident_id)
         self._commit_adapter_update(lora_id, slot, prepared)
         self._active[lora_id] = None
+        if lora_id in self._pinned:
+            self._active.pin(lora_id)
 
     def _prepare_adapter_update(
         self, adapter: LoadedLoRA, slot: int

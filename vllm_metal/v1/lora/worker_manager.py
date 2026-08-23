@@ -75,24 +75,26 @@ class MetalWorkerLoRAManager:
     def set_active_adapters(
         self, lora_requests: set[LoRARequest], mapping: LoRAMapping | None
     ) -> None:
-        self._apply({r.lora_int_id for r in lora_requests})
+        self._apply(lora_requests)
         if mapping is not None:
             self._mm.set_adapter_mapping(mapping)
 
-    def _apply(self, requested: set[int]) -> None:
+    def _apply(self, lora_requests: set[LoRARequest]) -> None:
+        requested = {lora_request.lora_int_id for lora_request in lora_requests}
         if len(requested) > self._mm.lora_slots:
             raise RuntimeError(
                 f"Number of distinct LoRAs in batch ({len(requested)}) exceeds "
                 f"--max-loras ({self._mm.lora_slots})."
             )
-        for lid in requested:
-            if lid not in self._mm.list_adapters():
-                raise RuntimeError(
-                    f"LoRA {lid} requested but not loaded — engine should call "
-                    "add_lora before scheduling it."
-                )
         active_now = {a for a in self._mm.lora_index_to_id if a is not None}
-        for lid in active_now - requested:
-            self._mm.deactivate_adapter(lid)
-        for lid in requested:
-            self._mm.activate_adapter(lid)
+        for lora_id in active_now - requested:
+            if not self._mm.is_pinned(lora_id):
+                self._mm.deactivate_adapter(lora_id)
+        for lora_request in sorted(
+            lora_requests, key=lambda request: request.lora_int_id
+        ):
+            lora_id = lora_request.lora_int_id
+            if lora_request.load_inplace or lora_id not in self._mm.list_adapters():
+                self.add_adapter(lora_request)
+            else:
+                self._mm.activate_adapter(lora_id)

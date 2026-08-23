@@ -968,12 +968,12 @@ def test_runtime_stt_disables_lora_without_raising() -> None:
     assert rt.enabled is False
 
 
-def test_prepare_step_raises_for_unloaded_lora_id() -> None:
+def test_prepare_step_raises_for_unknown_lora_id() -> None:
     rt = runtime_mod.MetalLoRARuntime()
     # Manager presence is all prepare_step checks before routing; the raise
     # fires in the routing loop before the manager is ever touched.
     rt._manager = SimpleNamespace(set_active_adapters=lambda *a, **k: None)
-    with pytest.raises(ValueError, match="LoRA id 7 was routed .* not "):
+    with pytest.raises(ValueError, match="LoRA id 7 was routed .* not known"):
         rt.prepare_step([(7, 1)])
 
 
@@ -991,7 +991,7 @@ def test_prepare_step_marks_prefill_mapping() -> None:
     manager = CapturingManager()
     rt = runtime_mod.MetalLoRARuntime()
     rt._manager = manager
-    rt._loaded[7] = Request()
+    rt._requests_by_id[7] = Request()
 
     rt.prepare_step([(7, 3)])
 
