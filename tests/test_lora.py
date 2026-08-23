@@ -1078,8 +1078,12 @@ def test_add_adapter_rejects_ambiguous_suffix_match_before_cache_mutation() -> N
     assert all(sid is None for sid in manager.lora_index_to_id)
 
 
-def _stub_lora_request(lora_id: int, *, load_inplace: bool = False) -> SimpleNamespace:
-    return SimpleNamespace(
+class _StubLoRARequest(SimpleNamespace):
+    __hash__ = object.__hash__
+
+
+def _stub_lora_request(lora_id: int, *, load_inplace: bool = False) -> _StubLoRARequest:
+    return _StubLoRARequest(
         lora_int_id=lora_id,
         lora_path=f"/fake/adapter-{lora_id}",
         load_inplace=load_inplace,
@@ -1131,6 +1135,29 @@ def test_worker_manager_empty_batch_deactivates_stale_adapters(monkeypatch) -> N
     assert all(sid is None for sid in manager._mm.lora_index_to_id)
 
 
+def test_worker_manager_keeps_pinned_adapter_resident(monkeypatch) -> None:
+    manager = _make_worker_manager()
+    _patch_loader(
+        monkeypatch,
+        {
+            lora_id: _make_adapter(
+                lora_id,
+                fc1_a=np.array([[1.0, 0.0]], dtype=np.float32),
+                fc1_b=np.array([[float(lora_id)], [0.0]], dtype=np.float32),
+            )
+            for lora_id in (1, 2)
+        },
+    )
+
+    assert manager.add_adapter(_stub_lora_request(1)) is True
+    assert manager.pin_adapter(1) is True
+
+    manager.set_active_adapters(set(), None)
+    manager.set_active_adapters({_stub_lora_request(2)}, None)
+
+    assert manager._mm.lora_index_to_id == [1, 2]
+
+
 def test_worker_manager_evicts_between_sequential_adapters(monkeypatch) -> None:
     """The default one-entry cache must serve more than one adapter over time."""
     manager = worker_manager_mod.MetalWorkerLoRAManager(
@@ -1157,6 +1184,41 @@ def test_worker_manager_evicts_between_sequential_adapters(monkeypatch) -> None:
     assert manager.list_adapters() == {2}
     assert manager._mm.lora_index_to_id == [2]
     np.testing.assert_array_equal(_active_fc1_lora_b(manager, 2), [2.0, 0.0])
+
+
+def test_worker_manager_reloads_requested_adapter_after_cache_eviction(
+    monkeypatch,
+) -> None:
+    manager = worker_manager_mod.MetalWorkerLoRAManager(
+        model=_TwoLinearModel(),
+        lora_config=_lora_config_stub(max_loras=2, max_lora_rank=1, max_cpu_loras=2),
+        max_num_seqs=2,
+        max_num_batched_tokens=4,
+        dtype=mx.float32,
+    )
+    adapters = {
+        lora_id: _make_adapter(
+            lora_id,
+            fc1_a=np.array([[1.0, 0.0]], dtype=np.float32),
+            fc1_b=np.array([[float(lora_id)], [0.0]], dtype=np.float32),
+        )
+        for lora_id in (1, 2, 3)
+    }
+    _patch_loader(monkeypatch, adapters)
+
+    request_1 = _stub_lora_request(1)
+    request_2 = _stub_lora_request(2)
+    request_3 = _stub_lora_request(3)
+    manager.add_adapter(request_1)
+    manager.add_adapter(request_2)
+    manager.set_active_adapters({request_1, request_2}, None)
+
+    manager.add_adapter(request_3)
+    manager.set_active_adapters({request_1, request_3}, None)
+
+    assert set(manager._mm.lora_index_to_id) == {1, 3}
+    np.testing.assert_array_equal(_active_fc1_lora_b(manager, 1), [1.0, 0.0])
+    np.testing.assert_array_equal(_active_fc1_lora_b(manager, 3), [3.0, 0.0])
 
 
 def test_worker_manager_add_adapter_load_inplace_replaces_weights(monkeypatch) -> None:
