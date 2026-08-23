@@ -489,6 +489,22 @@ def _make_adapter(
     )
 
 
+def test_manager_rejects_cpu_capacity_below_resident_slots() -> None:
+    model = _TwoLinearModel()
+    with pytest.raises(ValueError, match="max_cpu_loras.*max_loras"):
+        model_manager_mod.MLXLoRAModelManager(
+            model=model,
+            lora_config=_lora_config_stub(
+                max_loras=2,
+                max_lora_rank=1,
+                max_cpu_loras=1,
+            ),
+            max_num_seqs=1,
+            max_num_batched_tokens=2,
+            dtype=mx.float32,
+        )
+
+
 def test_manager_wraps_linears_then_activate_applies_delta() -> None:
     """End-to-end: build manager, register + activate adapter, forward, check delta."""
     model = _TwoLinearModel()

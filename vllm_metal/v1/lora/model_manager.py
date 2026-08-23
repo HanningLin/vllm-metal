@@ -53,6 +53,17 @@ class MLXLoRAModelManager:
         )
         self.dtype = dtype
 
+        if (
+            self.lora_config.max_cpu_loras is not None
+            and self.lora_config.max_cpu_loras < self.lora_slots
+        ):
+            raise ValueError(
+                "LoRAConfig.max_cpu_loras must be greater than or equal to "
+                "LoRAConfig.max_loras. Metal uses max_loras for resident "
+                "execution slots and max_cpu_loras for registered adapter "
+                "capacity."
+            )
+
         self._registered: LRUCache[int, LoadedLoRA] = LRUCache(self.capacity)
         self._active: LRUCache[int, None] = LRUCache(self.lora_slots)
         self._pinned: set[int] = set()
