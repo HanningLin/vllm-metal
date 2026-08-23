@@ -30,15 +30,6 @@ class MetalWorkerLoRAManager:
         dtype: mx.Dtype,
         max_position_embeddings: int | None = None,
     ):
-        max_cpu_loras = lora_config.max_cpu_loras
-        if max_cpu_loras is not None and max_cpu_loras != lora_config.max_loras:
-            raise NotImplementedError(
-                "Metal LoRA does not implement the upstream "
-                "max_cpu_loras > max_loras cache tier yet: every added "
-                f"adapter is activated immediately. Got max_cpu_loras="
-                f"{max_cpu_loras}, max_loras={lora_config.max_loras}; set "
-                "--max-cpu-loras equal to --max-loras (or omit it)."
-            )
         self.lora_config = lora_config
         self.max_position_embeddings = max_position_embeddings
         self._mm = MLXLoRAModelManager(
@@ -49,7 +40,8 @@ class MetalWorkerLoRAManager:
         lora_id = lora_request.lora_int_id
         already_loaded = lora_id in self._mm.list_adapters()
         if already_loaded and not lora_request.load_inplace:
-            return False
+            self._mm.activate_adapter(lora_id)
+            return True
         adapter = load_peft_adapter(
             get_adapter_absolute_path(lora_request.lora_path),
             lora_id=lora_id,
@@ -66,7 +58,7 @@ class MetalWorkerLoRAManager:
             return False
         try:
             self._mm.activate_adapter(adapter.lora_id)
-        except ValueError:
+        except (RuntimeError, ValueError):
             self._mm.remove_adapter(adapter.lora_id)
             raise
         return True
@@ -102,5 +94,5 @@ class MetalWorkerLoRAManager:
         active_now = {a for a in self._mm.lora_index_to_id if a is not None}
         for lid in active_now - requested:
             self._mm.deactivate_adapter(lid)
-        for lid in requested - active_now:
+        for lid in requested:
             self._mm.activate_adapter(lid)

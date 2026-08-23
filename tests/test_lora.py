@@ -653,8 +653,8 @@ def test_manager_activate_invalidates_mapping_cache(monkeypatch) -> None:
     assert manager._last_mapping is None  # invalidated
 
 
-def test_manager_no_free_slot_raises() -> None:
-    """activate_adapter must raise once max_loras slots are full."""
+def test_manager_activation_evicts_lru_slot() -> None:
+    """Activating a cached adapter must replace the least-recent resident slot."""
     model = _TwoLinearModel()
     manager = model_manager_mod.MLXLoRAModelManager(
         model=model,
@@ -676,12 +676,14 @@ def test_manager_no_free_slot_raises() -> None:
     manager.add_adapter(a)
     manager.add_adapter(b)
     manager.activate_adapter(1)
-    with pytest.raises(ValueError, match="No free LoRA slots"):
-        manager.activate_adapter(2)
+    assert manager.activate_adapter(2) is True
+
+    assert manager.lora_index_to_id == [2]
+    assert manager.list_adapters() == {1, 2}
 
 
-def test_manager_add_adapter_over_capacity_raises() -> None:
-    """add_adapter must raise once max_cpu_loras adapters are registered."""
+def test_manager_add_adapter_evicts_lru_registered_adapter() -> None:
+    """The registered cache must evict its oldest unpinned adapter at capacity."""
     model = _TwoLinearModel()
     manager = model_manager_mod.MLXLoRAModelManager(
         model=model,
@@ -701,15 +703,16 @@ def test_manager_add_adapter_over_capacity_raises() -> None:
         fc1_b=np.array([[0.0], [1.0]], dtype=np.float32),
     )
     manager.add_adapter(a)
-    with pytest.raises(RuntimeError, match="capacity"):
-        manager.add_adapter(b)
+    assert manager.add_adapter(b) is True
+
+    assert manager.list_adapters() == {2}
 
 
-def test_manager_pin_tracks_existing_adapter_only() -> None:
+def test_manager_pin_prevents_lru_eviction() -> None:
     model = _TwoLinearModel()
     manager = model_manager_mod.MLXLoRAModelManager(
         model=model,
-        lora_config=_lora_config_stub(max_loras=1, max_lora_rank=1, max_cpu_loras=2),
+        lora_config=_lora_config_stub(max_loras=2, max_lora_rank=1, max_cpu_loras=2),
         max_num_seqs=1,
         max_num_batched_tokens=2,
         dtype=mx.float32,
@@ -721,9 +724,57 @@ def test_manager_pin_tracks_existing_adapter_only() -> None:
     )
     manager.add_adapter(adapter)
     assert manager.pin_adapter(7) is True
-    assert manager.pin_adapter(8) is False
-    assert manager.remove_adapter(7) is True
-    assert 7 not in manager.list_adapters()
+    with pytest.raises(ValueError, match="not registered"):
+        manager.pin_adapter(8)
+
+    manager.add_adapter(
+        _make_adapter(
+            8,
+            fc1_a=np.array([[1.0, 0.0]], dtype=np.float32),
+            fc1_b=np.array([[2.0], [0.0]], dtype=np.float32),
+        )
+    )
+    manager.add_adapter(
+        _make_adapter(
+            9,
+            fc1_a=np.array([[1.0, 0.0]], dtype=np.float32),
+            fc1_b=np.array([[3.0], [0.0]], dtype=np.float32),
+        )
+    )
+
+    assert manager.list_adapters() == {7, 9}
+
+
+def test_manager_all_pinned_cache_rejects_eviction_without_mutation() -> None:
+    model = _TwoLinearModel()
+    manager = model_manager_mod.MLXLoRAModelManager(
+        model=model,
+        lora_config=_lora_config_stub(max_loras=2, max_lora_rank=1, max_cpu_loras=2),
+        max_num_seqs=2,
+        max_num_batched_tokens=2,
+        dtype=mx.float32,
+    )
+    for lora_id in (1, 2):
+        manager.add_adapter(
+            _make_adapter(
+                lora_id,
+                fc1_a=np.array([[1.0, 0.0]], dtype=np.float32),
+                fc1_b=np.array([[float(lora_id)], [0.0]], dtype=np.float32),
+            )
+        )
+        manager.pin_adapter(lora_id)
+
+    with pytest.raises(RuntimeError, match="pinned"):
+        manager.add_adapter(
+            _make_adapter(
+                3,
+                fc1_a=np.array([[1.0, 0.0]], dtype=np.float32),
+                fc1_b=np.array([[3.0], [0.0]], dtype=np.float32),
+            )
+        )
+
+    assert manager.list_adapters() == {1, 2}
+    assert manager.lora_index_to_id == [1, 2]
 
 
 def test_manager_remove_all_adapters_clears_slots_and_registry() -> None:
@@ -949,20 +1000,20 @@ def test_prepare_step_marks_prefill_mapping() -> None:
     assert manager.mapping.is_prefill is True
 
 
-def test_worker_manager_rejects_cpu_loras_gt_max_loras() -> None:
-    with pytest.raises(NotImplementedError, match="max_cpu_loras > max_loras"):
-        worker_manager_mod.MetalWorkerLoRAManager(
-            model=_TwoLinearModel(),
-            lora_config=_lora_config_stub(
-                max_loras=2, max_lora_rank=8, max_cpu_loras=4
-            ),
-            max_num_seqs=1,
-            max_num_batched_tokens=8,
-            dtype=mx.float32,
-        )
+def test_worker_manager_supports_cpu_cache_larger_than_resident_slots() -> None:
+    manager = worker_manager_mod.MetalWorkerLoRAManager(
+        model=_TwoLinearModel(),
+        lora_config=_lora_config_stub(max_loras=2, max_lora_rank=8, max_cpu_loras=4),
+        max_num_seqs=1,
+        max_num_batched_tokens=8,
+        dtype=mx.float32,
+    )
+
+    assert manager._mm.capacity == 4
+    assert manager._mm.lora_slots == 2
 
 
-def test_activate_adapter_rejects_zero_module_match() -> None:
+def test_add_adapter_rejects_zero_module_match_before_cache_mutation() -> None:
     model = _TwoLinearModel()
     manager = model_manager_mod.MLXLoRAModelManager(
         model=model,
@@ -985,14 +1036,13 @@ def test_activate_adapter_rejects_zero_module_match() -> None:
             )
         },
     )
-    manager.add_adapter(bogus)
     with pytest.raises(ValueError, match="matched 0 wrapped modules"):
-        manager.activate_adapter(1)
-    # Slot must be rolled back so a later valid activation can use it.
+        manager.add_adapter(bogus)
+    assert manager.list_adapters() == set()
     assert all(sid is None for sid in manager.lora_index_to_id)
 
 
-def test_activate_adapter_rejects_ambiguous_suffix_match() -> None:
+def test_add_adapter_rejects_ambiguous_suffix_match_before_cache_mutation() -> None:
     """If two adapter keys both suffix-match a wrapped module, fail loudly."""
     model = _TwoLinearModel()
     manager = model_manager_mod.MLXLoRAModelManager(
@@ -1022,9 +1072,9 @@ def test_activate_adapter_rejects_ambiguous_suffix_match() -> None:
             "fc2": _w("fc2"),
         },
     )
-    manager.add_adapter(ambiguous)
     with pytest.raises(ValueError, match="ambiguous suffix matches"):
-        manager.activate_adapter(42)
+        manager.add_adapter(ambiguous)
+    assert manager.list_adapters() == set()
     assert all(sid is None for sid in manager.lora_index_to_id)
 
 
@@ -1081,6 +1131,34 @@ def test_worker_manager_empty_batch_deactivates_stale_adapters(monkeypatch) -> N
     assert all(sid is None for sid in manager._mm.lora_index_to_id)
 
 
+def test_worker_manager_evicts_between_sequential_adapters(monkeypatch) -> None:
+    """The default one-entry cache must serve more than one adapter over time."""
+    manager = worker_manager_mod.MetalWorkerLoRAManager(
+        model=_TwoLinearModel(),
+        lora_config=_lora_config_stub(max_loras=1, max_lora_rank=1, max_cpu_loras=1),
+        max_num_seqs=1,
+        max_num_batched_tokens=2,
+        dtype=mx.float32,
+    )
+    adapters = {
+        lora_id: _make_adapter(
+            lora_id,
+            fc1_a=np.array([[1.0, 0.0]], dtype=np.float32),
+            fc1_b=np.array([[float(lora_id)], [0.0]], dtype=np.float32),
+        )
+        for lora_id in (1, 2)
+    }
+    _patch_loader(monkeypatch, adapters)
+
+    assert manager.add_adapter(_stub_lora_request(1)) is True
+    manager.set_active_adapters(set(), None)
+    assert manager.add_adapter(_stub_lora_request(2)) is True
+
+    assert manager.list_adapters() == {2}
+    assert manager._mm.lora_index_to_id == [2]
+    np.testing.assert_array_equal(_active_fc1_lora_b(manager, 2), [2.0, 0.0])
+
+
 def test_worker_manager_add_adapter_load_inplace_replaces_weights(monkeypatch) -> None:
     """Re-adding the same lora_int_id with load_inplace=True must swap weights."""
     manager = _make_worker_manager()
@@ -1100,8 +1178,8 @@ def test_worker_manager_add_adapter_load_inplace_replaces_weights(monkeypatch) -
     assert manager.add_adapter(_stub_lora_request(7)) is True
     np.testing.assert_array_equal(_active_fc1_lora_b(manager, 7), [3.0, 0.0])
 
-    # Without load_inplace, the duplicate add is a no-op.
-    assert manager.add_adapter(_stub_lora_request(7)) is False
+    # Without load_inplace, the duplicate add is an idempotent success.
+    assert manager.add_adapter(_stub_lora_request(7)) is True
 
     # With load_inplace=True, the new weights must replace the old in the slot.
     state[7] = v2
