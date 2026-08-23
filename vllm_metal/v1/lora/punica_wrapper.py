@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""MLX PunicaWrapper — gather + batched matmul for the rank-r LoRA delta.
+"""MLX PunicaWrapper — grouped matmuls for the rank-r LoRA delta.
 
-Slot ``max_loras`` is the permanently-zero null slot: no-LoRA tokens are
-remapped to it so the kernel runs branch-free.
+No-LoRA tokens are passed through without indexing a weight slot.
 """
 
 from __future__ import annotations
@@ -20,25 +19,27 @@ class PunicaWrapperMLX:
         self.max_num_batched_tokens = max_num_batched_tokens
         self.max_batches = max_batches
         self.max_loras = max_loras
-        self._token_slot_indices: mx.array | None = None
+        self._token_indices_by_slot: tuple[tuple[int, mx.array], ...] = ()
         self._no_lora = True
 
     @property
     def no_lora(self) -> bool:
         return self._no_lora
 
-    @property
-    def token_slot_indices(self) -> mx.array | None:
-        return self._token_slot_indices
-
     def update_metadata(
         self, mapping: LoRAMapping, lora_index_to_id: list[int | None]
     ) -> None:
-        null = self.max_loras
         slot_of = {aid: i for i, aid in enumerate(lora_index_to_id) if aid is not None}
-        tok = [slot_of.get(t, null) for t in mapping.index_mapping]
-        self._token_slot_indices = mx.array(tok, dtype=mx.int32)
-        self._no_lora = all(s == null for s in tok)
+        token_indices_by_slot: dict[int, list[int]] = {}
+        for token_index, adapter_id in enumerate(mapping.index_mapping):
+            slot = slot_of.get(adapter_id)
+            if slot is not None:
+                token_indices_by_slot.setdefault(slot, []).append(token_index)
+        self._token_indices_by_slot = tuple(
+            (slot, mx.array(indices, dtype=mx.int32))
+            for slot, indices in sorted(token_indices_by_slot.items())
+        )
+        self._no_lora = not self._token_indices_by_slot
 
     def add_lora_linear(
         self,
@@ -47,13 +48,21 @@ class PunicaWrapperMLX:
         lora_a_stacked: mx.array,
         lora_b_stacked: mx.array,
         scale: float,
+        lora_ranks: list[int] | None = None,
     ) -> mx.array:
-        """``y += (B[idx] @ A[idx] @ x) * scale``  per token."""
-        if self._no_lora or self._token_slot_indices is None:
+        """Apply LoRA deltas once per active adapter slot."""
+        if self._no_lora:
             return y
-        idx = self._token_slot_indices
-        a, b = (
-            mx.take(lora_a_stacked, idx, axis=0),
-            mx.take(lora_b_stacked, idx, axis=0),
-        )
-        return y + mx.matmul(b, mx.matmul(a, x[:, :, None])).squeeze(-1) * scale
+        max_rank = int(lora_a_stacked.shape[1])
+        ranks = lora_ranks or [max_rank] * self.max_loras
+        output = y
+        for slot, token_indices in self._token_indices_by_slot:
+            rank = ranks[slot]
+            if rank == 0:
+                continue
+            lora_a = lora_a_stacked[slot, :rank]
+            lora_b = lora_b_stacked[slot, :, :rank]
+            x_for_slot = mx.take(x, token_indices, axis=0)
+            delta = mx.matmul(mx.matmul(x_for_slot, lora_a.T), lora_b.T)
+            output = output.at[token_indices].add(delta * scale)
+        return output

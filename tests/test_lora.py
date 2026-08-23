@@ -45,6 +45,31 @@ def test_punica_add_lora_linear_no_lora_is_a_passthrough() -> None:
     np.testing.assert_array_equal(np.array(out), np.array(y))
 
 
+def test_punica_segmented_path_uses_actual_adapter_rank() -> None:
+    wrapper = punica_mod.PunicaWrapperMLX(
+        max_num_batched_tokens=1, max_batches=1, max_loras=1
+    )
+    wrapper.update_metadata(
+        LoRAMapping(index_mapping=(7,), prompt_mapping=(7,)),
+        lora_index_to_id=[7],
+    )
+    a_stacked = mx.array(
+        np.array([[[1.0], [100.0], [100.0], [100.0]]], dtype=np.float32)
+    )
+    b_stacked = mx.array(np.array([[[1.0, 100.0, 100.0, 100.0]]], dtype=np.float32))
+
+    out = wrapper.add_lora_linear(
+        mx.zeros((1, 1), dtype=mx.float32),
+        mx.ones((1, 1), dtype=mx.float32),
+        a_stacked,
+        b_stacked,
+        scale=1.0,
+        lora_ranks=[1],
+    )
+
+    np.testing.assert_array_equal(np.array(out), [[1.0]])
+
+
 # MLXLinearWithLoRA wrapper
 
 
@@ -68,6 +93,18 @@ def test_linear_wrapper_set_lora_writes_into_correct_slot() -> None:
     np.testing.assert_array_equal(a_stacked[1, 2:, :], np.zeros((2, 3)))
     np.testing.assert_array_equal(b_stacked[1, :, :2], np.ones((4, 2)))
     np.testing.assert_array_equal(b_stacked[1, :, 2:], np.zeros((4, 2)))
+
+
+def test_linear_wrapper_allocates_only_resident_slots() -> None:
+    wrapper = layers_mod.MLXLinearWithLoRA(
+        base_layer=nn.Linear(input_dims=3, output_dims=4, bias=False),
+        max_loras=2,
+        max_lora_rank=4,
+        dtype=mx.float32,
+    )
+
+    assert wrapper.lora_a_stacked.shape == (2, 4, 3)
+    assert wrapper.lora_b_stacked.shape == (2, 4, 4)
 
 
 @pytest.mark.parametrize(
@@ -263,10 +300,8 @@ def test_lookup_weights_for_module(stored_key, lookup, expected_hit) -> None:
 # Multi-adapter batching
 
 
-def _stack_with_null(*per_slot_a: np.ndarray) -> tuple[mx.array, int, int]:
-    """Stack rank-1 LoRA A weights into ``(slots+1, rank, in)`` with null tail."""
-    null = np.zeros_like(per_slot_a[0])
-    stacked = np.stack([*per_slot_a, null])
+def _stack_adapters(*per_slot_a: np.ndarray) -> tuple[mx.array, int, int]:
+    stacked = np.stack(per_slot_a)
     return mx.array(stacked), int(stacked.shape[1]), int(stacked.shape[2])
 
 
@@ -281,12 +316,11 @@ def test_punica_routes_two_adapters_in_one_batch() -> None:
 
     a0 = np.array([[1.0, 0.0]], dtype=np.float32)  # adapter 11 picks dim 0
     a1 = np.array([[0.0, 1.0]], dtype=np.float32)  # adapter 22 picks dim 1
-    a_stacked, _, _ = _stack_with_null(a0, a1)
+    a_stacked, _, _ = _stack_adapters(a0, a1)
 
     b0 = np.array([[1.0]], dtype=np.float32)  # adapter 11: out scale 1
     b1 = np.array([[10.0]], dtype=np.float32)  # adapter 22: out scale 10
-    b_null = np.zeros_like(b0)
-    b_stacked = mx.array(np.stack([b0, b1, b_null]))
+    b_stacked = mx.array(np.stack([b0, b1]))
 
     x = mx.array(
         np.array([[2.0, 3.0], [2.0, 3.0], [4.0, 5.0], [4.0, 5.0]], dtype=np.float32)
@@ -303,7 +337,7 @@ def test_punica_routes_two_adapters_in_one_batch() -> None:
 
 
 def test_punica_three_adapters_with_no_lora_token() -> None:
-    """Mixed batch: 3 adapters + a base-model token routed to the null slot."""
+    """Mixed batch: 3 adapters + one base-model token."""
     wrapper = punica_mod.PunicaWrapperMLX(
         max_num_batched_tokens=4, max_batches=4, max_loras=3
     )
@@ -311,7 +345,7 @@ def test_punica_three_adapters_with_no_lora_token() -> None:
     wrapper.update_metadata(mapping, lora_index_to_id=[7, 8, 9])
 
     # Three rank-1 adapters that each return a scalar = adapter index + 1.
-    a_stacked, _, _ = _stack_with_null(
+    a_stacked, _, _ = _stack_adapters(
         np.array([[1.0]], dtype=np.float32),
         np.array([[2.0]], dtype=np.float32),
         np.array([[3.0]], dtype=np.float32),
@@ -322,7 +356,6 @@ def test_punica_three_adapters_with_no_lora_token() -> None:
                 np.array([[1.0]], dtype=np.float32),
                 np.array([[1.0]], dtype=np.float32),
                 np.array([[1.0]], dtype=np.float32),
-                np.array([[0.0]], dtype=np.float32),  # null slot
             ]
         )
     )
@@ -332,7 +365,7 @@ def test_punica_three_adapters_with_no_lora_token() -> None:
 
     out = np.array(wrapper.add_lora_linear(y, x, a_stacked, b_stacked, scale=1.0))
 
-    # Adapters add 1, 2, 0 (null), 3 to the base of 100.
+    # Adapters add 1, 2, 0 (no LoRA), 3 to the base of 100.
     np.testing.assert_allclose(out.flatten(), [101.0, 102.0, 100.0, 103.0], rtol=1e-5)
 
 
@@ -350,8 +383,8 @@ def test_punica_batched_matches_per_token_single_adapter_runs() -> None:
         rng.standard_normal((out_dim, rank)).astype(np.float32),
         rng.standard_normal((out_dim, rank)).astype(np.float32),
     )
-    a_stacked = mx.array(np.stack([a0, a1, np.zeros_like(a0)]))
-    b_stacked = mx.array(np.stack([b0, b1, np.zeros_like(b0)]))
+    a_stacked = mx.array(np.stack([a0, a1]))
+    b_stacked = mx.array(np.stack([b0, b1]))
 
     x_np = rng.standard_normal((4, in_dim)).astype(np.float32)
     x = mx.array(x_np)
@@ -388,13 +421,12 @@ def test_punica_update_metadata_reroutes_after_slot_churn() -> None:
     # Adapter 11 picks dim 0 (=> output 1), adapter 22 picks dim 1 (=> output 10).
     a0 = np.array([[1.0, 0.0]], dtype=np.float32)
     a1 = np.array([[0.0, 1.0]], dtype=np.float32)
-    a_stacked = mx.array(np.stack([a0, a1, np.zeros_like(a0)]))
+    a_stacked = mx.array(np.stack([a0, a1]))
     b_stacked = mx.array(
         np.stack(
             [
                 np.array([[1.0]], dtype=np.float32),
                 np.array([[10.0]], dtype=np.float32),
-                np.array([[0.0]], dtype=np.float32),
             ]
         )
     )
@@ -406,20 +438,18 @@ def test_punica_update_metadata_reroutes_after_slot_churn() -> None:
         LoRAMapping(index_mapping=(11, 11), prompt_mapping=(11,)),
         lora_index_to_id=[11, None],
     )
-    assert wrapper.token_slot_indices.tolist() == [0, 0]
     out1 = np.array(wrapper.add_lora_linear(y, x, a_stacked, b_stacked, scale=1.0))
     np.testing.assert_allclose(out1.flatten(), [1.0, 1.0], rtol=1e-5)
 
     # Step 2: adapter 11 moved to slot 1 (because slot 0 now holds 22). The
     # weight stack the manager passes also gets reordered: slot 0 = adapter 22's
     # weights, slot 1 = adapter 11's. Token 0 still requests adapter 11 -> slot 1.
-    a_stacked_swapped = mx.array(np.stack([a1, a0, np.zeros_like(a0)]))
+    a_stacked_swapped = mx.array(np.stack([a1, a0]))
     b_stacked_swapped = mx.array(
         np.stack(
             [
                 np.array([[10.0]], dtype=np.float32),
                 np.array([[1.0]], dtype=np.float32),
-                np.array([[0.0]], dtype=np.float32),
             ]
         )
     )
@@ -427,13 +457,9 @@ def test_punica_update_metadata_reroutes_after_slot_churn() -> None:
         LoRAMapping(index_mapping=(11, 22), prompt_mapping=(11, 22)),
         lora_index_to_id=[22, 11],
     )
-    assert wrapper.token_slot_indices.tolist() == [1, 0]
     out2 = np.array(
         wrapper.add_lora_linear(y, x, a_stacked_swapped, b_stacked_swapped, scale=1.0)
     )
-    # Token 0 (adapter 11, slot 1): a1·[1,1]=1, b·1=1.  No, wait — slot 1 holds adapter 11.
-    # a_swapped[1] = a0 = [1,0]; a0·[1,1] = 1; b_swapped[1] = [[1.0]]; -> 1.0.
-    # Token 1 (adapter 22, slot 0): a_swapped[0] = a1 = [0,1]; a1·[1,1] = 1; b_swapped[0] = [[10.0]]; -> 10.0.
     np.testing.assert_allclose(out2.flatten(), [1.0, 10.0], rtol=1e-5)
 
 
