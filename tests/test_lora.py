@@ -45,7 +45,7 @@ def test_punica_add_lora_linear_no_lora_is_a_passthrough() -> None:
     np.testing.assert_array_equal(np.array(out), np.array(y))
 
 
-def test_punica_segmented_path_uses_actual_adapter_rank() -> None:
+def test_punica_contiguous_run_uses_actual_adapter_rank() -> None:
     wrapper = punica_mod.PunicaWrapperMLX(
         max_num_batched_tokens=1, max_batches=1, max_loras=1
     )
@@ -68,6 +68,28 @@ def test_punica_segmented_path_uses_actual_adapter_rank() -> None:
     )
 
     np.testing.assert_array_equal(np.array(out), [[1.0]])
+
+
+def test_punica_handles_fragmented_routing() -> None:
+    wrapper = punica_mod.PunicaWrapperMLX(
+        max_num_batched_tokens=8, max_batches=8, max_loras=2
+    )
+    wrapper.update_metadata(
+        LoRAMapping(
+            index_mapping=(11, 22, 11, 22, 11, 22, 11, 22),
+            prompt_mapping=(11, 22),
+        ),
+        lora_index_to_id=[11, 22],
+    )
+    a_stacked = mx.array(np.array([[[1.0, 0.0]], [[0.0, 1.0]]], dtype=np.float32))
+    b_stacked = mx.array(np.array([[[1.0]], [[10.0]]], dtype=np.float32))
+    x = mx.array(np.ones((8, 2), dtype=np.float32))
+    y = mx.zeros((8, 1), dtype=mx.float32)
+
+    out = wrapper.add_lora_linear(y, x, a_stacked, b_stacked, scale=1.0)
+    np.testing.assert_array_equal(
+        np.array(out).flatten(), [1.0, 10.0, 1.0, 10.0, 1.0, 10.0, 1.0, 10.0]
+    )
 
 
 # MLXLinearWithLoRA wrapper
