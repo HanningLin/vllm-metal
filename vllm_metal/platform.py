@@ -496,6 +496,21 @@ class MetalPlatform(Platform):
                 "1 + num_speculative_tokens, or leave it unset."
             )
 
+        # All three Metal proposers (draft-model, MTP, n-gram) hand drafts back
+        # to the scheduler synchronously via take_draft_token_ids(), so async
+        # scheduling cannot serve speculative decoding. vLLM 0.28.0 auto-enables
+        # async scheduling for draft-model SD (vllm#48341); restore the working
+        # default, the same downgrade shape as the STT scheduler policy.
+        if (
+            speculative_config is not None
+            and vllm_config.scheduler_config.async_scheduling
+        ):
+            vllm_config.scheduler_config.async_scheduling = False
+            logger.warning(
+                "Speculative decoding on Metal requires synchronous "
+                "scheduling; disabled async_scheduling."
+            )
+
         if model_config is not None and model_config.is_hybrid:
             cache_config = vllm_config.cache_config
             if cache_config.mamba_ssm_cache_dtype == "auto":
@@ -506,29 +521,30 @@ class MetalPlatform(Platform):
                     "--mamba-ssm-cache-dtype float32 because recurrent state is "
                     "stored in fp32."
                 )
-            if cache_config.enable_prefix_caching and not config.use_paged_attention:
-                raise NotImplementedError(
-                    "Prefix caching for hybrid GDN models requires paged "
-                    "attention on Metal (VLLM_METAL_USE_PAGED_ATTENTION=1); "
-                    "the non-paged MLX path has no block-indexed state to "
-                    "restore from."
-                )
             if cache_config.mamba_cache_mode == "all":
+                # Before the downgrades below, which overwrite the mode: an
+                # explicit --mamba-cache-mode all must fail fast on every path.
                 raise NotImplementedError(
                     "mamba_cache_mode='all' is not supported for hybrid GDN "
                     "models on Metal (nor upstream, which falls back to "
                     "'align' for models without SupportsMambaPrefixCaching). "
                     "Use align mode: --enable-prefix-caching resolves to it."
                 )
+            if cache_config.enable_prefix_caching and not config.use_paged_attention:
+                cls._disable_hybrid_prefix_caching(
+                    vllm_config,
+                    "the non-paged MLX path (VLLM_METAL_USE_PAGED_ATTENTION=0) "
+                    "has no block-indexed state to restore from",
+                )
             if (
                 cache_config.enable_prefix_caching
                 and vllm_config.speculative_config is not None
             ):
-                raise NotImplementedError(
-                    "Prefix caching for hybrid GDN models on Metal does not "
-                    "support speculative decoding yet: draft-state rollback "
-                    "across mamba state blocks (num_speculative_blocks) is "
-                    "not implemented. Disable one of the two."
+                cls._disable_hybrid_prefix_caching(
+                    vllm_config,
+                    "draft-state rollback across mamba state blocks "
+                    "(num_speculative_blocks) is not implemented for "
+                    "speculative decoding",
                 )
 
         # Pipeline parallelism is supported on Metal/MLX: each stage runs in its
@@ -810,18 +826,6 @@ class MetalPlatform(Platform):
         if parallel_config.data_parallel_size > 1:
             cls._register_dp_ray_worker_setup_hook(parallel_config.ray_runtime_env)
 
-        # COMPAT(vLLM 0.27.1): UniProc uses get_ip() for its local gloo
-        # rendezvous. Use loopback so a VPN tunnel address cannot be selected.
-        # Remove after pinned vLLM includes vllm#50999, which uses a file://
-        # store for UniProc rendezvous.
-        if (
-            parallel_config.distributed_executor_backend == "uni"
-            and parallel_config.world_size == 1
-            and parallel_config.data_parallel_size == 1
-            and not os.environ.get("VLLM_HOST_IP")
-        ):
-            os.environ["VLLM_HOST_IP"] = "127.0.0.1"
-
         # Last, after every fail-fast: default the MLX command-buffer memory
         # limit where the memory trade is safe (policy on the class constants
         # above; spawned engine workers inherit the environment).
@@ -834,6 +838,43 @@ class MetalPlatform(Platform):
             f"Metal memory: {total_mem / 1e9:.1f}GB total, "
             f"{available_mem / 1e9:.1f}GB available"
         )
+
+    @staticmethod
+    def _disable_hybrid_prefix_caching(vllm_config: "VllmConfig", reason: str) -> None:
+        """Downgrade default-on prefix caching for a hybrid GDN model.
+
+        vLLM 0.28.0 enables prefix caching by default for hybrid models
+        (vllm#50991) and resolves ``mamba_cache_mode``/``mamba_block_size``
+        for the APC-on case before this platform hook runs. For hybrid
+        combinations Metal cannot serve, restore the APC-off resolution
+        (``mamba_cache_mode='none'``, ``mamba_block_size=max_model_len``)
+        the way upstream's ``MambaModelConfig.verify_and_update_config``
+        else-branch would have, instead of failing a default launch.
+        """
+        cache_config = vllm_config.cache_config
+        if cache_config.user_specified_mamba_block_size:
+            # --mamba-block-size requires prefix caching (upstream's
+            # validate_mamba_block_size rejects it once APC is off), so the
+            # user's two explicit choices conflict; fail with the Metal
+            # constraint before upstream's misleading error fires.
+            raise NotImplementedError(
+                "Prefix caching for hybrid GDN models on Metal cannot serve "
+                f"this configuration ({reason}), and --mamba-block-size "
+                "requires prefix caching. Drop --mamba-block-size or the "
+                "conflicting option."
+            )
+        logger.warning(
+            "Disabling prefix caching for this hybrid GDN model: %s. "
+            "(vLLM enables prefix caching by default for hybrid models; "
+            "pass --no-enable-prefix-caching to make this explicit.)",
+            reason,
+        )
+        cache_config.enable_prefix_caching = False
+        cache_config.mamba_cache_mode = "none"
+        # Restore upstream's APC-off resolution; validate_mamba_block_size
+        # (a pydantic after-validator, so it runs after this hook) rejects
+        # any other value once prefix caching is off.
+        cache_config.mamba_block_size = vllm_config.model_config.max_model_len
 
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
@@ -1051,6 +1092,14 @@ class MetalPlatform(Platform):
                 mamba_page_size,
             )
             cache_config.block_size = attn_block_size
+
+        # vLLM pins mamba_block_size = block_size under align mode before this
+        # hook runs; re-sync it after the TurboQuant realign grows the block
+        # size, or the hybrid KV coordinator's divisibility asserts fail at
+        # startup (mirrors upstream's own re-sync in
+        # Platform.update_block_size_for_backend).
+        if cache_config.mamba_cache_mode == "align":
+            cache_config.mamba_block_size = cache_config.block_size
 
         # Pad mamba page size to exactly match the packed attention page.
         attn_page_size = cache_config.block_size * tq_page_size_1_token
