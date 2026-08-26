@@ -21,6 +21,7 @@ class PunicaWrapperMLX:
         self.max_loras = max_loras
         self._contiguous_runs: tuple[tuple[int | None, int, int], ...] = ()
         self._token_indices_by_slot: tuple[tuple[int, mx.array], ...] = ()
+        self._num_tokens = 0
         self._no_lora = True
 
     @property
@@ -49,8 +50,12 @@ class PunicaWrapperMLX:
         if mapping.index_mapping:
             runs.append((run_slot, run_start, len(mapping.index_mapping)))
 
+        self._num_tokens = len(mapping.index_mapping)
         active_slot_count = len(token_indices_by_slot)
-        use_contiguous_runs = active_slot_count > 0 and len(runs) <= active_slot_count
+        lora_run_count = sum(1 for slot, _, _ in runs if slot is not None)
+        use_contiguous_runs = (
+            active_slot_count > 0 and lora_run_count <= active_slot_count
+        )
         self._contiguous_runs = tuple(runs) if use_contiguous_runs else ()
         self._token_indices_by_slot = (
             ()
@@ -74,8 +79,13 @@ class PunicaWrapperMLX:
         """Apply LoRA deltas once per active adapter slot."""
         if self._no_lora:
             return y
+        if int(x.shape[0]) != self._num_tokens or int(y.shape[0]) != self._num_tokens:
+            raise ValueError(
+                "LoRA routing row count mismatch: "
+                f"metadata={self._num_tokens}, x={x.shape[0]}, y={y.shape[0]}"
+            )
         max_rank = int(lora_a_stacked.shape[1])
-        ranks = lora_ranks or [max_rank] * self.max_loras
+        ranks = lora_ranks if lora_ranks is not None else [max_rank] * self.max_loras
 
         if self._contiguous_runs:
             outputs: list[mx.array] = []
@@ -92,7 +102,7 @@ class PunicaWrapperMLX:
                 lora_b = lora_b_stacked[slot, :, :rank]
                 x_run = x[start:end]
                 delta = mx.matmul(mx.matmul(x_run, lora_a.T), lora_b.T)
-                outputs.append(y_run + delta * scale)
+                outputs.append(y_run + (delta * scale).astype(y.dtype))
             return mx.concatenate(outputs, axis=0)
 
         output = y
@@ -104,5 +114,5 @@ class PunicaWrapperMLX:
             lora_b = lora_b_stacked[slot, :, :rank]
             x_for_slot = mx.take(x, token_indices, axis=0)
             delta = mx.matmul(mx.matmul(x_for_slot, lora_a.T), lora_b.T)
-            output = output.at[token_indices].add(delta * scale)
+            output = output.at[token_indices].add((delta * scale).astype(y.dtype))
         return output

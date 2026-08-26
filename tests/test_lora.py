@@ -92,6 +92,45 @@ def test_punica_handles_fragmented_routing() -> None:
     )
 
 
+def test_punica_output_dtype_matches_base_for_contiguous_and_fragmented() -> None:
+    a_stacked = mx.array(np.array([[[1.0]], [[2.0]]], dtype=np.float32))
+    b_stacked = mx.array(np.array([[[3.0]], [[4.0]]], dtype=np.float32))
+    x = mx.ones((4, 1), dtype=mx.float16)
+    y = mx.zeros((4, 1), dtype=mx.float16)
+
+    for index_mapping in ((11, 11, 22, 22), (11, 22, 11, 22)):
+        wrapper = punica_mod.PunicaWrapperMLX(
+            max_num_batched_tokens=4, max_batches=4, max_loras=2
+        )
+        wrapper.update_metadata(
+            LoRAMapping(index_mapping=index_mapping, prompt_mapping=(11, 22)),
+            lora_index_to_id=[11, 22],
+        )
+
+        out = wrapper.add_lora_linear(y, x, a_stacked, b_stacked, scale=1.0)
+
+        assert out.dtype == y.dtype
+
+
+def test_punica_rejects_routing_row_count_mismatch() -> None:
+    wrapper = punica_mod.PunicaWrapperMLX(
+        max_num_batched_tokens=2, max_batches=2, max_loras=1
+    )
+    wrapper.update_metadata(
+        LoRAMapping(index_mapping=(7, 7), prompt_mapping=(7,)),
+        lora_index_to_id=[7],
+    )
+
+    with pytest.raises(ValueError, match="LoRA routing row count mismatch"):
+        wrapper.add_lora_linear(
+            mx.zeros((1, 1), dtype=mx.float32),
+            mx.ones((1, 1), dtype=mx.float32),
+            mx.ones((1, 1, 1), dtype=mx.float32),
+            mx.ones((1, 1, 1), dtype=mx.float32),
+            scale=1.0,
+        )
+
+
 # MLXLinearWithLoRA wrapper
 
 
@@ -115,6 +154,18 @@ def test_linear_wrapper_set_lora_writes_into_correct_slot() -> None:
     np.testing.assert_array_equal(a_stacked[1, 2:, :], np.zeros((2, 3)))
     np.testing.assert_array_equal(b_stacked[1, :, :2], np.ones((4, 2)))
     np.testing.assert_array_equal(b_stacked[1, :, 2:], np.zeros((4, 2)))
+
+
+def test_linear_wrapper_rank_metadata_is_not_a_module_parameter() -> None:
+    wrapper = layers_mod.MLXLinearWithLoRA(
+        base_layer=nn.Linear(input_dims=3, output_dims=4, bias=False),
+        max_loras=2,
+        max_lora_rank=4,
+        dtype=mx.float32,
+    )
+
+    assert "lora_ranks" not in wrapper.parameters()
+    assert "_lora_ranks" not in wrapper.parameters()
 
 
 def test_linear_wrapper_allocates_only_resident_slots() -> None:
