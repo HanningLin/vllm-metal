@@ -14,17 +14,12 @@ if TYPE_CHECKING:
     from vllm.lora.layers import LoRAMapping
 
 
-# Contiguous runs avoid gather/scatter for common prefill layouts. Grouping wins
-# once routing alternates heavily because it reduces matmul launches.
-MAX_CONTIGUOUS_RUNS_PER_SLOT = 2
-
-
 class PunicaWrapperMLX:
     def __init__(self, max_num_batched_tokens: int, max_batches: int, max_loras: int):
         self.max_num_batched_tokens = max_num_batched_tokens
         self.max_batches = max_batches
         self.max_loras = max_loras
-        self._runs: tuple[tuple[int | None, int, int], ...] = ()
+        self._contiguous_runs: tuple[tuple[int | None, int, int], ...] = ()
         self._token_indices_by_slot: tuple[tuple[int, mx.array], ...] = ()
         self._no_lora = True
 
@@ -55,13 +50,11 @@ class PunicaWrapperMLX:
             runs.append((run_slot, run_start, len(mapping.index_mapping)))
 
         active_slot_count = len(token_indices_by_slot)
-        use_runs = active_slot_count > 0 and len(runs) <= (
-            MAX_CONTIGUOUS_RUNS_PER_SLOT * active_slot_count
-        )
-        self._runs = tuple(runs) if use_runs else ()
+        use_contiguous_runs = active_slot_count > 0 and len(runs) <= active_slot_count
+        self._contiguous_runs = tuple(runs) if use_contiguous_runs else ()
         self._token_indices_by_slot = (
             ()
-            if use_runs
+            if use_contiguous_runs
             else tuple(
                 (slot, mx.array(indices, dtype=mx.int32))
                 for slot, indices in sorted(token_indices_by_slot.items())
@@ -84,9 +77,9 @@ class PunicaWrapperMLX:
         max_rank = int(lora_a_stacked.shape[1])
         ranks = lora_ranks or [max_rank] * self.max_loras
 
-        if self._runs:
+        if self._contiguous_runs:
             outputs: list[mx.array] = []
-            for slot, start, end in self._runs:
+            for slot, start, end in self._contiguous_runs:
                 y_run = y[start:end]
                 if slot is None:
                     outputs.append(y_run)
