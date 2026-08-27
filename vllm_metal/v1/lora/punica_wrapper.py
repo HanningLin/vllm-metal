@@ -33,13 +33,13 @@ class PunicaWrapperMLX:
     ) -> None:
         slot_of = {aid: i for i, aid in enumerate(lora_index_to_id) if aid is not None}
         runs: list[tuple[int | None, int, int]] = []
-        token_indices_by_slot: dict[int, list[int]] = {}
+        active_slots: set[int] = set()
         run_slot: int | None = None
         run_start = 0
         for token_index, adapter_id in enumerate(mapping.index_mapping):
             slot = slot_of.get(adapter_id)
             if slot is not None:
-                token_indices_by_slot.setdefault(slot, []).append(token_index)
+                active_slots.add(slot)
             if token_index == 0:
                 run_slot = slot
                 continue
@@ -51,21 +51,22 @@ class PunicaWrapperMLX:
             runs.append((run_slot, run_start, len(mapping.index_mapping)))
 
         self._num_tokens = len(mapping.index_mapping)
-        active_slot_count = len(token_indices_by_slot)
         lora_run_count = sum(1 for slot, _, _ in runs if slot is not None)
-        use_contiguous_runs = (
-            active_slot_count > 0 and lora_run_count <= active_slot_count
-        )
+        use_contiguous_runs = bool(active_slots) and lora_run_count <= len(active_slots)
         self._contiguous_runs = tuple(runs) if use_contiguous_runs else ()
-        self._token_indices_by_slot = (
-            ()
-            if use_contiguous_runs
-            else tuple(
+        if use_contiguous_runs:
+            self._token_indices_by_slot = ()
+        else:
+            token_indices_by_slot: dict[int, list[int]] = {}
+            for token_index, adapter_id in enumerate(mapping.index_mapping):
+                slot = slot_of.get(adapter_id)
+                if slot is not None:
+                    token_indices_by_slot.setdefault(slot, []).append(token_index)
+            self._token_indices_by_slot = tuple(
                 (slot, mx.array(indices, dtype=mx.int32))
                 for slot, indices in sorted(token_indices_by_slot.items())
             )
-        )
-        self._no_lora = active_slot_count == 0
+        self._no_lora = not active_slots
 
     def add_lora_linear(
         self,
