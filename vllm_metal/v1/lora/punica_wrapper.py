@@ -118,7 +118,7 @@ class PunicaWrapperMLX:
 
         if self._contiguous_runs:
             outputs: list[mx.array] = []
-            applied_delta = False
+            has_lora_delta = False
             for slot, start, end in self._contiguous_runs:
                 y_run = y[start:end]
                 if slot is None:
@@ -136,9 +136,9 @@ class PunicaWrapperMLX:
                     delta = delta * scale
                 if delta.dtype != y.dtype:
                     delta = delta.astype(y.dtype)
-                applied_delta = True
+                has_lora_delta = True
                 outputs.append(y_run + delta)
-            if not applied_delta:
+            if not has_lora_delta:
                 return y
             return outputs[0] if len(outputs) == 1 else mx.concatenate(outputs, axis=0)
 
