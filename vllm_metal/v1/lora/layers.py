@@ -66,10 +66,11 @@ class _LoRALinearBase(nn.Module):
         self.base_layer = base_layer
         self.max_loras, self.max_lora_rank = max_loras, max_lora_rank
         self.input_size, self.output_size = input_size, output_size
-        self.lora_a_stacked = mx.zeros((max_loras, max_lora_rank, input_size), dtype)
-        self.lora_b_stacked = mx.zeros((max_loras, output_size, max_lora_rank), dtype)
+        slots = max_loras + 1
+        self.lora_a_stacked = mx.zeros((slots, max_lora_rank, input_size), dtype)
+        self.lora_b_stacked = mx.zeros((slots, output_size, max_lora_rank), dtype)
         # MLX tracks lists assigned through Module.__setattr__; ranks are metadata.
-        object.__setattr__(self, "_lora_ranks", [0] * max_loras)
+        object.__setattr__(self, "_lora_ranks", [0] * slots)
         self.punica_wrapper: PunicaWrapperMLX | None = None
 
     def set_mapping(self, punica_wrapper: PunicaWrapperMLX) -> None:

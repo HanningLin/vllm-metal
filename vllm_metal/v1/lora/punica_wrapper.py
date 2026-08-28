@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""MLX PunicaWrapper — grouped matmuls for the rank-r LoRA delta.
+"""MLX PunicaWrapper — route LoRA deltas by adapter slot.
 
-No-LoRA tokens are passed through without indexing a weight slot.
+Prefill batches avoid per-token weight expansion; decode keeps the compact
+batched path that works best for small token counts.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ class PunicaWrapperMLX:
         self.max_loras = max_loras
         self._contiguous_runs: tuple[tuple[int | None, int, int], ...] = ()
         self._token_indices_by_slot: tuple[tuple[int, mx.array], ...] = ()
+        self._expanded_slot_indices: mx.array | None = None
         self._num_tokens = 0
         self._no_lora = True
 
@@ -32,6 +34,20 @@ class PunicaWrapperMLX:
         self, mapping: LoRAMapping, lora_index_to_id: list[int | None]
     ) -> None:
         slot_of = {aid: i for i, aid in enumerate(lora_index_to_id) if aid is not None}
+        self._num_tokens = len(mapping.index_mapping)
+
+        if not mapping.is_prefill:
+            null_slot = self.max_loras
+            token_slots = [
+                slot_of.get(adapter_id, null_slot)
+                for adapter_id in mapping.index_mapping
+            ]
+            self._expanded_slot_indices = mx.array(token_slots, dtype=mx.int32)
+            self._contiguous_runs = ()
+            self._token_indices_by_slot = ()
+            self._no_lora = all(slot == null_slot for slot in token_slots)
+            return
+
         runs: list[tuple[int | None, int, int]] = []
         active_slots: set[int] = set()
         run_slot: int | None = None
@@ -50,13 +66,15 @@ class PunicaWrapperMLX:
         if mapping.index_mapping:
             runs.append((run_slot, run_start, len(mapping.index_mapping)))
 
-        self._num_tokens = len(mapping.index_mapping)
         lora_run_count = sum(1 for slot, _, _ in runs if slot is not None)
         use_contiguous_runs = bool(active_slots) and lora_run_count <= len(active_slots)
-        self._contiguous_runs = tuple(runs) if use_contiguous_runs else ()
         if use_contiguous_runs:
+            self._expanded_slot_indices = None
+            self._contiguous_runs = tuple(runs)
             self._token_indices_by_slot = ()
         else:
+            self._expanded_slot_indices = None
+            self._contiguous_runs = ()
             token_indices_by_slot: dict[int, list[int]] = {}
             for token_index, adapter_id in enumerate(mapping.index_mapping):
                 slot = slot_of.get(adapter_id)
@@ -85,6 +103,16 @@ class PunicaWrapperMLX:
                 "LoRA routing row count mismatch: "
                 f"metadata={self._num_tokens}, x={x.shape[0]}, y={y.shape[0]}"
             )
+
+        if self._expanded_slot_indices is not None:
+            lora_a = mx.take(lora_a_stacked, self._expanded_slot_indices, axis=0)
+            lora_b = mx.take(lora_b_stacked, self._expanded_slot_indices, axis=0)
+            return (
+                y
+                + mx.matmul(lora_b, mx.matmul(lora_a, x[:, :, None])).squeeze(-1)
+                * scale
+            )
+
         max_rank = int(lora_a_stacked.shape[1])
         ranks = lora_ranks if lora_ranks is not None else [max_rank] * self.max_loras
 
@@ -103,7 +131,11 @@ class PunicaWrapperMLX:
                 lora_b = lora_b_stacked[slot, :, :rank]
                 x_run = x[start:end]
                 delta = mx.matmul(mx.matmul(x_run, lora_a.T), lora_b.T)
-                outputs.append(y_run + (delta * scale).astype(y.dtype))
+                if scale != 1.0:
+                    delta = delta * scale
+                if delta.dtype != y.dtype:
+                    delta = delta.astype(y.dtype)
+                outputs.append(y_run + delta)
             return mx.concatenate(outputs, axis=0)
 
         output = y
@@ -115,5 +147,9 @@ class PunicaWrapperMLX:
             lora_b = lora_b_stacked[slot, :, :rank]
             x_for_slot = mx.take(x, token_indices, axis=0)
             delta = mx.matmul(mx.matmul(x_for_slot, lora_a.T), lora_b.T)
-            output = output.at[token_indices].add((delta * scale).astype(y.dtype))
+            if scale != 1.0:
+                delta = delta * scale
+            if delta.dtype != y.dtype:
+                delta = delta.astype(y.dtype)
+            output = output.at[token_indices].add(delta)
         return output
