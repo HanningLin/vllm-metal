@@ -70,6 +70,28 @@ def test_punica_contiguous_run_uses_actual_adapter_rank() -> None:
     np.testing.assert_array_equal(np.array(out), [[1.0]])
 
 
+def test_punica_contiguous_prefill_rank_zero_is_passthrough() -> None:
+    wrapper = punica_mod.PunicaWrapperMLX(
+        max_num_batched_tokens=2, max_batches=1, max_loras=1
+    )
+    wrapper.update_metadata(
+        LoRAMapping(index_mapping=(7, 7), prompt_mapping=(7,), is_prefill=True),
+        lora_index_to_id=[7],
+    )
+
+    y = mx.ones((2, 1), dtype=mx.float32)
+    out = wrapper.add_lora_linear(
+        y,
+        mx.ones((2, 1), dtype=mx.float32),
+        mx.ones((1, 1, 1), dtype=mx.float32),
+        mx.ones((1, 1, 1), dtype=mx.float32),
+        scale=1.0,
+        lora_ranks=[0],
+    )
+
+    assert out is y
+
+
 def test_punica_handles_fragmented_routing() -> None:
     wrapper = punica_mod.PunicaWrapperMLX(
         max_num_batched_tokens=80, max_batches=80, max_loras=2
@@ -1097,26 +1119,40 @@ def test_prepare_step_raises_for_unknown_lora_id() -> None:
 
 
 def test_prepare_step_marks_prefill_mapping() -> None:
-    class CapturingManager:
-        def __init__(self) -> None:
-            self.mapping = None
+    captured = {}
 
-        def set_active_adapters(self, lora_requests, mapping) -> None:
-            self.mapping = mapping
+    def capture_mapping(lora_requests, mapping) -> None:
+        captured["mapping"] = mapping
 
-    class Request:
-        pass
-
-    manager = CapturingManager()
     rt = runtime_mod.MetalLoRARuntime()
-    rt._manager = manager
-    rt._requests_by_id[7] = Request()
+    rt._manager = SimpleNamespace(set_active_adapters=capture_mapping)
+    rt._requests_by_id[7] = object()
 
     rt.prepare_step([(7, 3)])
 
-    assert manager.mapping.index_mapping == (7, 7, 7)
-    assert manager.mapping.prompt_mapping == (7,)
-    assert manager.mapping.is_prefill is True
+    mapping = captured["mapping"]
+    assert mapping.index_mapping == (7, 7, 7)
+    assert mapping.prompt_mapping == (7,)
+    assert mapping.is_prefill is True
+
+
+def test_prepare_step_keeps_mixed_decode_prefill_on_decode_route() -> None:
+    captured = {}
+
+    def capture_mapping(lora_requests, mapping) -> None:
+        captured["mapping"] = mapping
+
+    rt = runtime_mod.MetalLoRARuntime()
+    rt._manager = SimpleNamespace(set_active_adapters=capture_mapping)
+    rt._requests_by_id[7] = object()
+    rt._requests_by_id[8] = object()
+
+    rt.prepare_step([(7, 1), (8, 3)])
+
+    mapping = captured["mapping"]
+    assert mapping.index_mapping == (7, 8, 8, 8)
+    assert mapping.prompt_mapping == (7, 8)
+    assert mapping.is_prefill is False
 
 
 def test_worker_manager_supports_cpu_cache_larger_than_resident_slots() -> None:
