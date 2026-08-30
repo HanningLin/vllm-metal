@@ -7,6 +7,9 @@ with a tiny stub backbone whose ``.layers`` is a list of sentinels; the
 mlx_lm contract tests build a micro ``qwen3.Model`` from args in-process.
 """
 
+import os
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 
 import mlx.core as mx
@@ -49,6 +52,18 @@ def _make_model(n_layers: int) -> SimpleNamespace:
         norm=sentinel_norm,
     )
     return SimpleNamespace(model=backbone)
+
+
+def _use_ring_temp_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Keep bootstrap hostfiles inside pytest's managed temporary directory."""
+
+    def mkstemp(*, prefix: str, suffix: str) -> tuple[int, str]:
+        return tempfile.mkstemp(prefix=prefix, suffix=suffix, dir=tmp_path)
+
+    monkeypatch.setattr(
+        "vllm_metal.distributed.pipeline.tempfile",
+        SimpleNamespace(mkstemp=mkstemp),
+    )
 
 
 class TestPipelineGroupRankFlags:
@@ -180,6 +195,58 @@ class TestRingHosts:
         monkeypatch.setenv("VLLM_METAL_RING_BASE_PORT", "65535")
         with pytest.raises(ValueError, match="too high for the pipeline size"):
             _ring_hosts(["10.0.0.5", "10.0.0.6"])
+
+
+class TestBootstrapRing:
+    def test_restores_bootstrap_state_after_success(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _use_ring_temp_dir(monkeypatch, tmp_path)
+        monkeypatch.setenv("MLX_RANK", "original-rank")
+        monkeypatch.setenv("MLX_HOSTFILE", "original-hostfile")
+        hostfile: Path | None = None
+
+        def fake_init(*, backend: str) -> _FakeGroup:
+            nonlocal hostfile
+            hostfile = Path(os.environ["MLX_HOSTFILE"])
+            assert hostfile.exists()
+            assert os.environ["MLX_RANK"] == "1"
+            return _FakeGroup(rank=1, size=2)
+
+        monkeypatch.setattr(mx.distributed, "init", fake_init)
+
+        PipelineGroup.bootstrap_ring(rank=1, peer_ips=["10.0.0.5", "10.0.0.6"])
+
+        assert hostfile is not None
+        assert not hostfile.exists()
+        assert os.environ["MLX_RANK"] == "original-rank"
+        assert os.environ["MLX_HOSTFILE"] == "original-hostfile"
+
+    def test_cleans_bootstrap_state_and_preserves_init_error(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _use_ring_temp_dir(monkeypatch, tmp_path)
+        monkeypatch.delenv("MLX_RANK", raising=False)
+        monkeypatch.delenv("MLX_HOSTFILE", raising=False)
+        hostfile: Path | None = None
+        expected_error = RuntimeError("ring initialization failed")
+
+        def failing_init(*, backend: str) -> _FakeGroup:
+            nonlocal hostfile
+            hostfile = Path(os.environ["MLX_HOSTFILE"])
+            assert hostfile.exists()
+            raise expected_error
+
+        monkeypatch.setattr(mx.distributed, "init", failing_init)
+
+        with pytest.raises(RuntimeError) as raised:
+            PipelineGroup.bootstrap_ring(rank=0, peer_ips=["10.0.0.5", "10.0.0.6"])
+
+        assert raised.value is expected_error
+        assert hostfile is not None
+        assert not hostfile.exists()
+        assert "MLX_RANK" not in os.environ
+        assert "MLX_HOSTFILE" not in os.environ
 
 
 class _StubLayer(nn.Module):
