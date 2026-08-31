@@ -926,12 +926,17 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
                 *,
                 seeds,
                 target_hidden_states,
-                target_input_embeddings,
+                embed_target_tokens,
+                num_speculative_tokens,
             ):
                 captured["seeds"] = seeds
                 captured["hidden_states"] = target_hidden_states.tolist()
-                captured["embeddings"] = target_input_embeddings.tolist()
-                return [[42]]
+                captured["num_speculative_tokens"] = num_speculative_tokens
+                input_ids = mx.array(
+                    [[seed.token_id for seed in seeds]], dtype=mx.int32
+                )
+                captured["embeddings"] = embed_target_tokens(input_ids).tolist()
+                return [[42, 43, 44]]
 
         class Adapter:
             def target_input_embeddings(self, model, input_ids):
@@ -957,6 +962,7 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
         scheduler_output = self._make_scheduler_output(
             {"r0": 2},
             {"r0": [7]},
+            num_spec_tokens_to_schedule=3,
         )
         self._install_paged_state(
             runner,
@@ -987,7 +993,8 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
             target_position=2,
             block_ids=((0,),),
         )
-        assert draft_token_ids == DraftTokenIds(["r0"], [[42]])
+        assert captured["num_speculative_tokens"] == 3
+        assert draft_token_ids == DraftTokenIds(["r0"], [[42, 43, 44]])
 
     def test_gemma4_mtp_honors_scheduler_selected_zero_drafts(self) -> None:
         class Assistant:
@@ -998,9 +1005,11 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
                 *,
                 seeds,
                 target_hidden_states,
-                target_input_embeddings,
+                embed_target_tokens,
+                num_speculative_tokens,
             ):
-                del seeds, target_hidden_states, target_input_embeddings
+                del seeds, target_hidden_states
+                del embed_target_tokens, num_speculative_tokens
                 raise AssertionError("assistant should not draft when K=0")
 
         class Adapter:
@@ -1055,9 +1064,13 @@ class TestV1MetalModelRunnerSpecDecodeVerification:
                 *,
                 seeds,
                 target_hidden_states,
-                target_input_embeddings,
+                embed_target_tokens,
+                num_speculative_tokens,
             ):
-                del target_hidden_states, target_input_embeddings
+                del target_hidden_states, num_speculative_tokens
+                embed_target_tokens(
+                    mx.array([[seed.token_id for seed in seeds]], dtype=mx.int32)
+                )
                 captured["seeds"] = seeds
                 return [[43]]
 
