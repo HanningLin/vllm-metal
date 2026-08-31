@@ -81,6 +81,7 @@ def make_stub_runner(
         "sliding_window_per_layer": None,
         "use_async_scheduling": True,
         "_sampler": None,
+        "_native_sample_key": None,
         "_structured_output_applier": MetalStructuredOutputApplier(),
         "_lora": MetalLoRARuntime(),
         "_yoco_cache_mapping": None,
@@ -115,7 +116,10 @@ def make_stub_runner(
             validate=runner._validate_scheduled_outputs,
         )
 
-    # Derive _vocab_size from model_args — single source of truth.
+    # Derive _vocab_size from model_args — single source of truth. The
+    # deferred sampler reads it on every step, so default it when the test
+    # does not care about vocab shape.
+    _model_args.setdefault("vocab_size", 32)
     if "vocab_size" in _model_args:
         runner._vocab_size = _model_args["vocab_size"]
 

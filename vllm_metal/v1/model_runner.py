@@ -113,7 +113,6 @@ from vllm_metal.v1.sampling_batch import (
     GREEDY_TEMPERATURE_EPS,
     SamplingBatch,
     _SamplingResult,
-    mlx_greedy_tokens,
     sample_decode_tokens,
     sample_from_logits,
     sample_prefill_tokens,
@@ -360,6 +359,15 @@ class MetalModelRunner:
         self.scheduler_config = vllm_config.scheduler_config
         self.use_async_scheduling = bool(self.scheduler_config.async_scheduling)
         self.metal_config = get_config()
+        # MLX-native sampling key chain (opt-in via VLLM_METAL_NATIVE_SAMPLING).
+        # Derived from the engine seed, so sampling is reproducible for a
+        # fixed request schedule; split once per sampling call. A live key is
+        # the single runtime capability signal for the native random path.
+        self._native_sample_key: mx.array | None = (
+            mx.random.key(self.model_config.seed)
+            if envs.VLLM_METAL_NATIVE_SAMPLING
+            else None
+        )
         self._model_adapter: ModelAdapter = DefaultModelAdapter()
         self._cache_policy = ModelCachePolicy(self, self._model_adapter)
         self._model_lifecycle = ModelLifecycle(self, self._model_adapter)
@@ -1555,11 +1563,26 @@ class MetalModelRunner:
                 not states_missing
                 and SamplingBatch.params_allow_native_greedy(decode_params)
             ),
+            native_random=(
+                self._native_sample_key is not None
+                and not states_missing
+                and SamplingBatch.params_allow_native_random(decode_params)
+            ),
             has_prompt_logprobs=any(
                 sp.prompt_logprobs is not None for sp in decode_params
             ),
         )
         return self._decode_pipeline.evaluate_gate(capabilities, step, sampling)
+
+    def _next_native_sample_key(self) -> mx.array:
+        """Split the runner's sampling key chain and return the step key."""
+        if self._native_sample_key is None:
+            raise RuntimeError(
+                "native sampling key requested while the chain is disabled "
+                "— gate desync."
+            )
+        self._native_sample_key, subkey = mx.random.split(self._native_sample_key)
+        return subkey
 
     def _sample_paged_batch(
         self,
@@ -2865,7 +2888,7 @@ class MetalModelRunner:
         return None
 
     def _submit_deferred_decode_sample(self) -> MetalAsyncModelRunnerOutput:
-        """Submit a lazy greedy sample and defer its sync one step.
+        """Submit a lazy sample and defer its sync one step.
 
         All value-independent bookkeeping happens here so the next step's
         ``execute_model`` sees advanced ``generated_tokens`` / seq lens; the
@@ -2890,7 +2913,16 @@ class MetalModelRunner:
         assert logits is not None
         self._draft_token_ids = None
 
-        tokens = mlx_greedy_tokens(logits[0, : len(decode_reqs), :])
+        tokens = SamplingBatch.native_decode_tokens(
+            logits[0, : len(decode_reqs), :],
+            [state.sampling_params for _, state in decode_reqs],
+            vocab_size=self._vocab_size,
+            next_key=(
+                self._next_native_sample_key
+                if self._native_sample_key is not None
+                else None
+            ),
+        )
         # Submit now: the token buffer is scheduled right after this step's
         # forward and ahead of the next step's encode, so the deferred
         # resolve is a pure wait on already-queued GPU work.

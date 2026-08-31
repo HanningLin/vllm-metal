@@ -4,7 +4,7 @@
 Pure functions: logits in, token IDs out.  No model runner state accessed.
 """
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import ClassVar
 
@@ -191,6 +191,137 @@ class SamplingBatch:
             and not sampling_params.bad_words_token_ids
             for sampling_params in sampling_params_list
         )
+
+    @staticmethod
+    def params_allow_native_random(
+        sampling_params_list: Sequence[SamplingParams],
+    ) -> bool:
+        """Whether MLX categorical sampling matches *sampling_params_list*.
+
+        Mirror of :meth:`params_allow_native_greedy` for the non-greedy case:
+        every request must use plain temperature/top-k/top-p sampling, with
+        one shared ``(top_k, top_p)`` across the batch so a single mask graph
+        covers every row. Seeded requests keep the torch path, whose
+        per-request ``torch.Generator`` contract MLX keys do not reproduce.
+        Options the platform rejects outright (``min_p``, ``logit_bias``)
+        are not re-checked here.
+        """
+        if not sampling_params_list:
+            return False
+        shared_top_k = len({sp.top_k for sp in sampling_params_list}) == 1
+        shared_top_p = len({sp.top_p for sp in sampling_params_list}) == 1
+        return (
+            shared_top_k
+            and shared_top_p
+            and all(
+                sp.temperature >= GREEDY_TEMPERATURE_EPS
+                and sp.seed is None
+                and sp.frequency_penalty == 0.0
+                and sp.presence_penalty == 0.0
+                and sp.repetition_penalty == 1.0
+                and sp.logprobs is None
+                and sp.logprob_token_ids is None
+                and not sp.allowed_token_ids
+                and not sp.bad_words_token_ids
+                for sp in sampling_params_list
+            )
+        )
+
+    @classmethod
+    def native_decode_tokens(
+        cls,
+        logits_2d: mx.array,
+        sampling_params_list: Sequence[SamplingParams],
+        *,
+        vocab_size: int,
+        next_key: Callable[[], mx.array] | None,
+    ) -> mx.array:
+        """Build the lazy native token graph for a deferred decode batch.
+
+        Owns the sampling policy for the decode pipeline's deferred step:
+        greedy argmax when the batch allows it, otherwise the temperature/
+        top-k/top-p categorical graph over the vocab-sliced logits (unlike
+        argmax, categorical can select a padded lm_head column). The caller
+        owns evaluation and RNG state; ``next_key`` is consumed only on the
+        random path. Raises on batches neither native path admits — the
+        pipeline gate must not let those reach here.
+        """
+        if cls.params_allow_native_greedy(sampling_params_list):
+            return mlx_greedy_tokens(logits_2d)
+        if next_key is not None and cls.params_allow_native_random(
+            sampling_params_list
+        ):
+            return cls._native_random_tokens(
+                logits_2d[..., :vocab_size], sampling_params_list, next_key()
+            )
+        key_state = "live" if next_key is not None else "absent"
+        raise RuntimeError(
+            "Deferred sampling requires a native-greedy or native-random "
+            f"eligible batch (native sample key {key_state}, random-eligible="
+            f"{cls.params_allow_native_random(sampling_params_list)}) "
+            "— gate desync."
+        )
+
+    @staticmethod
+    def _top_k_top_p_masked_logits(
+        scaled_logits: mx.array,
+        top_k: int,
+        top_p: float,
+    ) -> mx.array:
+        """Mask temperature-scaled logits to the top-k/top-p candidate set.
+
+        Mask semantics match vLLM's ``apply_top_k_top_p``: ties at the top-k
+        threshold survive, while top-p masks sorted positions individually
+        (boundary ties do NOT all survive; which tied token survives follows
+        sort order). The leading sorted position carries zero leading mass,
+        so every valid ``top_p > 0`` keeps at least one candidate.
+        Non-candidates become ``-inf``.
+        """
+        vocab_size = int(scaled_logits.shape[-1])
+        if 0 < top_k < vocab_size:
+            kth_largest = mx.min(
+                mx.topk(scaled_logits, k=top_k, axis=-1), axis=-1, keepdims=True
+            )
+            scaled_logits = mx.where(
+                scaled_logits < kth_largest, -mx.inf, scaled_logits
+            )
+        if top_p < 1.0:
+            order_desc = mx.argsort(scaled_logits, axis=-1)[..., ::-1]
+            sorted_desc = mx.take_along_axis(scaled_logits, order_desc, axis=-1)
+            sorted_probs = mx.softmax(sorted_desc, axis=-1)
+            leading_mass = mx.cumsum(sorted_probs, axis=-1) - sorted_probs
+            keep = leading_mass < top_p
+            masked_sorted = mx.where(keep, sorted_desc, -mx.inf)
+            scaled_logits = mx.put_along_axis(
+                mx.full(scaled_logits.shape, -mx.inf, dtype=scaled_logits.dtype),
+                order_desc,
+                masked_sorted,
+                axis=-1,
+            )
+        return scaled_logits
+
+    @classmethod
+    def _native_random_tokens(
+        cls,
+        logits_2d: mx.array,
+        sampling_params_list: Sequence[SamplingParams],
+        key: mx.array,
+    ) -> mx.array:
+        """Lazy temperature/top-k/top-p token ids, one per row.
+
+        Only valid for batches that pass :meth:`params_allow_native_random`:
+        per-row temperature with one shared ``(top_k, top_p)``.
+        """
+        temperatures = mx.array(
+            [sp.temperature for sp in sampling_params_list], dtype=mx.float32
+        )
+        scaled = logits_2d.astype(mx.float32) / temperatures[:, None]
+        masked = cls._top_k_top_p_masked_logits(
+            scaled,
+            sampling_params_list[0].top_k,
+            sampling_params_list[0].top_p,
+        )
+        return mx.random.categorical(masked, axis=-1, key=key)
 
     def _make_temperature(self) -> torch.Tensor | None:
         if self.all_greedy:
