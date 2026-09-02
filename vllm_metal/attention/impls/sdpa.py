@@ -530,7 +530,7 @@ def sdpa_forward(
     #   Qwen3/Llama/Gemma/Gemma4: n_heads, n_kv_heads
     #   Qwen3.5 (Qwen3Next):      num_attention_heads, num_key_value_heads
     #   StableLM:                 num_heads, num_key_value_heads
-    #   DeepSeek:                 num_attention_heads, num_kv_heads
+    #   DeepseekAttention:        num_attention_heads, num_kv_heads
     n_heads = (
         getattr(inner, "n_heads", None)
         or getattr(inner, "num_attention_heads", None)
