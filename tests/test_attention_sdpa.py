@@ -758,8 +758,14 @@ class TestSDPAForward:
 
         assert captured["num_kv_heads"] == actual_kv_heads
 
-    def test_gpt_oss_scale_and_sinks_reach_kernel(self) -> None:
-        """GPT-OSS exposes ``sm_scale`` and per-head attention sinks."""
+    @pytest.mark.parametrize(
+        ("softcap", "expected_softcap"),
+        [(50.0, 50.0), (None, 0.0)],
+    )
+    def test_scale_softcap_and_sinks_reach_kernel(
+        self, softcap: float | None, expected_softcap: float
+    ) -> None:
+        """Per-module attention parameters reach the paged kernel."""
         cache = MetalPagedKVCache(
             num_layers=1,
             num_kv_heads=_N_KV_HEADS,
@@ -775,6 +781,7 @@ class TestSDPAForward:
             num_key_value_heads=_N_KV_HEADS,
             sm_scale=expected_scale,
             sinks=fp16_sinks,
+            attn_logit_softcapping=softcap,
             o_proj=lambda out: out,
         )
         ctx = _make_ctx(_SEQ_LEN)
@@ -802,11 +809,13 @@ class TestSDPAForward:
                 _value_cache,
                 _num_kv_heads,
                 scale,
+                received_softcap,
                 *_args,
                 sinks=None,
                 **_kwargs,
             ) -> None:
                 captured["scale"] = scale
+                captured["softcap"] = received_softcap
                 captured["sinks"] = sinks
 
         with (
@@ -826,6 +835,7 @@ class TestSDPAForward:
 
         sinks = captured["sinks"]
         assert captured["scale"] == expected_scale
+        assert captured["softcap"] == expected_softcap
         assert isinstance(sinks, mx.array)
         assert sinks.dtype == mx.float32
 
