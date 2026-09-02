@@ -627,6 +627,78 @@ class _PagedRoutingOpsSpy:
 class TestSDPAForward:
     """Tests for ``sdpa_forward`` runtime argument propagation."""
 
+    def test_deepseek_num_kv_heads_naming_reaches_kernel(self) -> None:
+        """DeepSeek exposes ``num_kv_heads``, not ``num_key_value_heads``."""
+        from mlx_lm.models.deepseek import DeepseekAttention, ModelArgs
+
+        args = ModelArgs(
+            model_type="deepseek",
+            vocab_size=32,
+            hidden_size=16,
+            intermediate_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+        )
+        inner = DeepseekAttention(args)
+        x = mx.zeros((1, 2, 16), dtype=mx.float16)
+        cache = MetalPagedKVCache(
+            num_layers=1,
+            num_kv_heads=2,
+            head_dim=4,
+            num_blocks=1,
+            block_size=8,
+            dtype=mx.float16,
+        )
+        captured: dict[str, int | float] = {}
+
+        class _FakeOps:
+            def reshape_and_cache(
+                self,
+                _keys,
+                _values,
+                key_cache,
+                value_cache,
+                _slot_mapping,
+            ) -> tuple[mx.array, mx.array]:
+                return key_cache, value_cache
+
+            def paged_attention_primitive(
+                self,
+                _query,
+                _key_cache,
+                _value_cache,
+                num_kv_heads,
+                scale,
+                *_args,
+                **_kwargs,
+            ) -> None:
+                captured["num_kv_heads"] = num_kv_heads
+                captured["scale"] = scale
+
+        with (
+            patch.object(sdpa_mod, "get_ops", return_value=_FakeOps()),
+            patch.object(
+                sdpa_mod,
+                "truncate_padded_output",
+                return_value=mx.zeros((1, 2, 16), dtype=mx.float16),
+            ),
+        ):
+            output, (keys, values) = sdpa_forward(
+                inner,
+                x,
+                _make_ctx(2),
+                cache,
+                layer_idx=0,
+            )
+
+        mx.eval(output, keys, values)
+        assert output.shape == (1, 2, 16)
+        assert keys.shape == (1, 2, 2, 4)
+        assert values.shape == (1, 2, 2, 4)
+        assert captured["num_kv_heads"] == 2
+        assert captured["scale"] == 0.5
+
     def test_mixed_batch_routes_slots_and_page_tables_by_layer_group(self) -> None:
         """Full and sliding layers consume their scheduler-group metadata."""
         layout = MHAKVCacheLayout(
