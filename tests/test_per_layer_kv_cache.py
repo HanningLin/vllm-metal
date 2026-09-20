@@ -52,10 +52,7 @@ def vllm_config_for_kv_grouping() -> VllmConfig:
     return vllm_config
 
 
-@pytest.mark.parametrize("disable_hybrid_manager", [False, True])
-def test_uniform_olmo3_geometry_uses_window_groups(
-    monkeypatch, disable_hybrid_manager: bool
-) -> None:
+def _make_uniform_olmo3_runner(*, disable_hybrid_manager: bool = False):
     args = asdict(
         Olmo3Args(
             model_type="olmo3",
@@ -72,12 +69,6 @@ def test_uniform_olmo3_geometry_uses_window_groups(
         )
     )
     adapter = DefaultModelAdapter()
-    assert (
-        adapter.build_per_layer_kv_shapes(
-            args, num_layers=8, num_kv_heads=2, head_dim=64
-        )
-        is None
-    )
     config = vllm_config_for_kv_grouping()
     config.model_config = SimpleNamespace(
         max_model_len=512,
@@ -101,20 +92,26 @@ def test_uniform_olmo3_geometry_uses_window_groups(
         ),
         sliding_window_per_layer=adapter.build_sliding_window_per_layer(args, 8),
     )
+    return adapter, args, runner
+
+
+def test_uniform_olmo3_geometry_uses_window_groups(monkeypatch) -> None:
+    adapter, args, runner = _make_uniform_olmo3_runner()
     monkeypatch.setattr(
         "vllm_metal.v1.cache_policy.get_config", lambda: MetalConfig(mlx_device="gpu")
     )
+    assert (
+        adapter.build_per_layer_kv_shapes(
+            args, num_layers=8, num_kv_heads=2, head_dim=64
+        )
+        is None
+    )
     specs = runner.get_kv_cache_spec()
-    if disable_hybrid_manager:
-        assert all(type(spec) is FullAttentionSpec for spec in specs.values())
-        assert runner.scheduler_memory_reporting_mode() == "paged_attention_capacity"
-        return
-
     assert sum(type(spec) is SlidingWindowSpec for spec in specs.values()) == 6
     assert sum(type(spec) is FullAttentionSpec for spec in specs.values()) == 2
     assert runner.scheduler_memory_reporting_mode() == "paged_attention_layout_budget"
     budget = runner.get_cache_block_size_bytes() * 64
-    grouped = get_kv_cache_configs(config, [specs], [budget])[0]
+    grouped = get_kv_cache_configs(runner.vllm_config, [specs], [budget])[0]
     assert runner.paged_attention_runtime is None
     runner.initialize_kv_cache(grouped)
     backend = runner.paged_attention_runtime
@@ -127,6 +124,27 @@ def test_uniform_olmo3_geometry_uses_window_groups(
         isinstance(layer.self_attn, SDPAPagedAttentionWrapper)
         for layer in runner.model.layers
     )
+
+
+def test_uniform_olmo3_respects_disabled_hybrid_manager(monkeypatch) -> None:
+    _, _, runner = _make_uniform_olmo3_runner(disable_hybrid_manager=True)
+    monkeypatch.setattr(
+        "vllm_metal.v1.cache_policy.get_config", lambda: MetalConfig(mlx_device="gpu")
+    )
+    specs = runner.get_kv_cache_spec()
+
+    assert all(type(spec) is FullAttentionSpec for spec in specs.values())
+    assert runner.scheduler_memory_reporting_mode() == "paged_attention_capacity"
+
+
+def test_uniform_olmo3_window_groups_release_old_blocks(monkeypatch) -> None:
+    _, _, runner = _make_uniform_olmo3_runner()
+    monkeypatch.setattr(
+        "vllm_metal.v1.cache_policy.get_config", lambda: MetalConfig(mlx_device="gpu")
+    )
+    specs = runner.get_kv_cache_spec()
+    budget = runner.get_cache_block_size_bytes() * 64
+    grouped = get_kv_cache_configs(runner.vllm_config, [specs], [budget])[0]
     manager = KVCacheManager(
         grouped,
         max_model_len=512,

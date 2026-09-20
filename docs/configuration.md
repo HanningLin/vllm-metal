@@ -53,13 +53,7 @@ The paged KV cache budget follows vLLM's standard `--gpu-memory-utilization`
 flag (`gpu_memory_utilization=` for `LLM()`), a fraction in `(0, 1]`. The
 former `VLLM_METAL_MEMORY_FRACTION` override has been removed.
 
-Models mixing full and sliding-window attention, including OLMo 3 with
-uniform head shapes, use vLLM's grouped KV-cache planning on the standard
-paged path. Sliding layers can release blocks outside their window while
-full-attention layers retain the complete context. This can increase
-long-context serving capacity within the same KV budget; it does not reduce
-the model weights or guarantee a generation speedup.
-
-`--disable-hybrid-kv-cache-manager` keeps the dense cache path. The existing
-dense path also remains in use with TurboQuant, speculative decoding, KV
-sharing, or an explicit `--num-gpu-blocks-override`.
+Models with full and sliding-window attention use grouped KV cache, allowing
+sliding layers to release old blocks. This can improve long-context capacity,
+but not necessarily generation speed. Use `--disable-hybrid-kv-cache-manager`
+for dense allocation.
