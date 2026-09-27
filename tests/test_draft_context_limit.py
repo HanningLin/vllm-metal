@@ -224,7 +224,10 @@ def test_build_uses_reachable_scheduler_widths(
         speculative_config=config,
         parallel_config=None,
         controller=SpeculativeDecodeController(),
-        extract_logits=lambda value: value,
+        model_adapter=SimpleNamespace(
+            supports_selective_logits=lambda model: False,
+            extract_logits=lambda value: value,
+        ),
         num_blocks=3,
         max_model_len=4096,
         max_num_seqs=max_num_seqs,
