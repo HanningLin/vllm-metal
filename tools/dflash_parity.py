@@ -40,7 +40,13 @@ def compare(actual: mx.array, expected: mx.array) -> dict:
     }
 
 
-def qualify(target_path: Path, draft_path: Path, reference_path: Path) -> dict:
+def qualify(
+    target_path: Path,
+    draft_path: Path,
+    reference_path: Path,
+    *,
+    context_bucket_size: int = 256,
+) -> dict:
     # Loading arbitrary remote Python is deliberately not part of this tool.
     spec = importlib.util.spec_from_file_location("dflash_reference", reference_path)
     if spec is None or spec.loader is None:
@@ -75,11 +81,37 @@ def qualify(target_path: Path, draft_path: Path, reference_path: Path) -> dict:
         "Explain how a computer works in simple terms.",
         "Write a Python function that adds two numbers and explain it.",
     ]
+    # MLX switches from vector to full attention above eight block queries.
+    widths = sorted(
+        {
+            2,
+            *(min(n, draft.config.block_size) for n in (5, 8, 9)),
+            draft.config.block_size,
+        }
+    )
+    forwards = {
+        width: partial(
+            draft.draft_logits, num_draft_tokens=width - 1, embed=embed, project=project
+        )
+        for width in widths
+    }
+    compiled_forwards = {
+        width: mx.compile(forward) for width, forward in forwards.items()
+    }
+    bucketed_forwards = {
+        width: draft.compile_draft(
+            num_draft_tokens=width - 1,
+            embed=embed,
+            project=project,
+            context_bucket_size=context_bucket_size,
+        )
+        for width in widths
+    }
     rows = []
     for batch in (1, 2):
-        for length in (17, 33, 65):
+        for length in (17, 33, 65, 255, 256, 257, 769, 1022, 1023, 1024, 1025):
             token_rows = [
-                tokenizer.encode(prompts[i] * 12)[:length] for i in range(batch)
+                tokenizer.encode(prompts[i] * 256)[:length] for i in range(batch)
             ]
             if any(len(row) != length for row in token_rows):
                 raise ValueError("Prompt did not produce the requested context length")
@@ -112,17 +144,10 @@ def qualify(target_path: Path, draft_path: Path, reference_path: Path) -> dict:
                     delattr(target, "_hidden_states")
             anchors = mx.argmax(native_logits[:, -1], axis=-1)
             draft.validate_anchors(anchors)
-            for width in sorted(
-                {2, min(5, draft.config.block_size), draft.config.block_size}
-            ):
-                forward = partial(
-                    draft.draft_logits,
-                    num_draft_tokens=width - 1,
-                    embed=embed,
-                    project=project,
-                )
-                actual = forward(anchors, features)
-                compiled = mx.compile(forward)(anchors, features)
+            for width in widths:
+                actual = forwards[width](anchors, features)
+                compiled = compiled_forwards[width](anchors, features)
+                bucketed = bucketed_forwards[width](anchors, features)
                 block = mx.concatenate(
                     [
                         anchors[:, None],
@@ -142,7 +167,8 @@ def qualify(target_path: Path, draft_path: Path, reference_path: Path) -> dict:
                 )
                 comparison = compare(actual, expected)
                 compiled_comparison = compare(compiled, expected)
-                for logits in (actual, compiled):
+                bucketed_comparison = compare(bucketed, expected)
+                for logits in (actual, compiled, bucketed):
                     np.testing.assert_array_equal(
                         np.array(mx.argmax(logits, axis=-1)),
                         np.array(mx.argmax(expected, axis=-1)),
@@ -155,6 +181,7 @@ def qualify(target_path: Path, draft_path: Path, reference_path: Path) -> dict:
                         "proposal_positions": batch * (width - 1),
                         "logits": comparison,
                         "compiled_logits": compiled_comparison,
+                        "bucketed_logits": bucketed_comparison,
                         "capture": capture_checks,
                         "argmax_exact": True,
                     }
@@ -162,10 +189,12 @@ def qualify(target_path: Path, draft_path: Path, reference_path: Path) -> dict:
                 print(
                     f"PASS B={batch} context={length} block={width} "
                     f"eager_error={comparison['max_abs_error']} "
-                    f"compiled_error={compiled_comparison['max_abs_error']}",
+                    f"compiled_error={compiled_comparison['max_abs_error']} "
+                    f"bucketed_error={bucketed_comparison['max_abs_error']}",
                     flush=True,
                 )
     return {
+        "context_bucket_size": context_bucket_size,
         "target": str(target_path.resolve()),
         "draft": str(draft_path.resolve()),
         "reference_sha256": hashlib.sha256(reference_path.read_bytes()).hexdigest(),
@@ -188,12 +217,20 @@ def main() -> None:
     parser.add_argument("--draft", type=Path, required=True)
     parser.add_argument("--reference", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--context-bucket-size", type=int, default=256)
     args = parser.parse_args()
+    if args.context_bucket_size < 1:
+        parser.error("--context-bucket-size must be a positive integer")
     if args.output.exists():
         parser.error(
             "--output must name a new file, so a failed run cannot leave a stale pass"
         )
-    result = qualify(args.target, args.draft, args.reference)
+    result = qualify(
+        args.target,
+        args.draft,
+        args.reference,
+        context_bucket_size=args.context_bucket_size,
+    )
     args.output.write_text(json.dumps(result, indent=2) + "\n")
 
 
