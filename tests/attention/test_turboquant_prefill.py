@@ -29,7 +29,10 @@ from vllm_metal.attention.context import (
     prepare_grouped,
 )
 from vllm_metal.attention.impls import sdpa
-from vllm_metal.attention.impls.turboquant_prefill import workspace_upper_bound
+from vllm_metal.attention.impls.turboquant_prefill import (
+    unsupported_reason,
+    workspace_upper_bound,
+)
 from vllm_metal.metal import get_ops
 from vllm_metal.v1.cache_policy import TurboQuantAttentionSpec
 
@@ -95,6 +98,28 @@ def assert_parity(case):
         rtol=0.03,
     )
     return output, reference
+
+
+def test_unsupported_reason_covers_each_gate() -> None:
+    """Every rejection arm names what disqualifies the model or layout."""
+    ok = {
+        "dtype": mx.float16,
+        "head_dim": 128,
+        "kernel_block_size": 16,
+        "cache_block_size": 32,
+        "stored_block_size": 32,
+    }
+    assert unsupported_reason(**ok) is None
+    assert "dtype" in unsupported_reason(**{**ok, "dtype": mx.float32})
+    assert "head_dim" in unsupported_reason(**{**ok, "head_dim": 96})
+    # Layout gates: kernel block must be a supported divisor of the cache
+    # block, and the stored layout must match the scheduler's.
+    for bad in (
+        {"kernel_block_size": 64},
+        {"stored_block_size": 16},
+        {"cache_block_size": 33},
+    ):
+        assert "cache layout" in unsupported_reason(**{**ok, **bad})
 
 
 @pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])

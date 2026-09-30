@@ -24,13 +24,15 @@ from vllm_metal.attention.caches.turboquant import (
     BLOCK_SIZE as TQ_BLOCK_SIZE,
 )
 from vllm_metal.attention.caches.turboquant import (
-    FWHT_SUPPORTED_HEAD_DIMS,
     QUANT_PARAMS,
     V_QUANT_PARAMS,
     packed_dim,
     prefill_workspace_bytes,
 )
-from vllm_metal.attention.impls.turboquant_prefill import workspace_upper_bound
+from vllm_metal.attention.impls.turboquant_prefill import (
+    dtype_head_reason,
+    workspace_upper_bound,
+)
 from vllm_metal.attention.runtime.hybrid import HybridPagedAttentionRuntime
 from vllm_metal.attention.runtime.hybrid_plan import HybridRuntimePlan
 from vllm_metal.attention.runtime.mla import MLAPagedAttentionRuntime
@@ -227,16 +229,12 @@ class ModelCachePolicy:
         # vLLM resolves max_model_len before workers start. Its later auto-fit
         # may shorten the context, but does not reclaim this fixed reservation.
         if runner.vllm_config.speculative_config is None:
-            if (
-                runner.head_dim not in FWHT_SUPPORTED_HEAD_DIMS
-                or self._require_kv_cache_dtype() not in (mx.float16, mx.bfloat16)
+            if reason := dtype_head_reason(
+                self._require_kv_cache_dtype(), runner.head_dim
             ):
                 cap = 0
                 logger.info_once(
-                    "Metal: TurboQuant prefill stays compressed for "
-                    "head_dim=%d, dtype=%s.",
-                    runner.head_dim,
-                    runner.kv_cache_dtype,
+                    "Metal: TurboQuant prefill stays compressed (%s).", reason
                 )
             else:
                 cap = workspace_upper_bound(
