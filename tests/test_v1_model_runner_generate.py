@@ -2617,6 +2617,7 @@ class TestProfileLogitsIndices:
         selective: bool = True,
         max_num_seqs: int = 8,
         num_speculative_tokens: int | None = None,
+        multimodal_adapter: object | None = None,
     ) -> mr.MetalModelRunner:
         speculative = (
             None
@@ -2625,6 +2626,7 @@ class TestProfileLogitsIndices:
         )
         return make_stub_runner(
             _selective_logits_supported=selective,
+            _multimodal_adapter=multimodal_adapter,
             scheduler_config=SimpleNamespace(
                 max_num_batched_tokens=8192, max_num_seqs=max_num_seqs
             ),
@@ -2640,11 +2642,23 @@ class TestProfileLogitsIndices:
         return mx.zeros((1, rows), dtype=mx.int32)
 
     def test_no_selection_keeps_every_row(self) -> None:
-        # Multimodal, pipeline parallel and LoRA models cannot select rows, and
-        # neither can a model whose adapter rejects it: all keep the full-head
-        # projection the profile used before.
+        # Pipeline parallel and LoRA models cannot select rows, and neither can
+        # a model whose adapter rejects it: all keep the full-head projection
+        # the profile used before.
         runner = self._runner(selective=False)
         assert runner._profile_logits_indices(self._ids(64)) is None
+
+    def test_forward_ready_multimodal_adapter_keeps_every_row(self) -> None:
+        # The mm forward projects logits for every packed row, so a step with
+        # an image needs the full-row reserve even when the text path selects.
+        runner = self._runner(multimodal_adapter=SimpleNamespace(forward_ready=True))
+        assert runner._profile_logits_indices(self._ids(64)) is None
+
+    def test_adapter_that_cannot_run_the_mm_forward_still_selects(self) -> None:
+        runner = self._runner(multimodal_adapter=SimpleNamespace(forward_ready=False))
+        indices = runner._profile_logits_indices(self._ids(64))
+        assert indices is not None
+        assert indices.tolist() == [*range(64 - 8, 64)]
 
     @pytest.mark.parametrize("rows", [1, 7, 8])
     def test_batch_no_larger_than_the_sampled_rows_keeps_every_row(

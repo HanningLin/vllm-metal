@@ -946,8 +946,11 @@ class MetalModelRunner:
         actually use.
 
         ``None`` keeps the full-row projection whenever selection cannot apply
-        (multimodal, pipeline parallel, LoRA) or the batch is smaller than the
-        rows a step can sample.
+        (pipeline parallel, LoRA, an adapter that rejects it), whenever the
+        model serves multimodal requests, or when the batch is smaller than
+        the rows a step can sample. The mm forward projects every packed row,
+        so on a forward-ready multimodal adapter a step with an image is the
+        worst case whatever the text path selects.
 
         This is the *sampler's* worst case. A step whose batch carries a
         prompt-logprobs request projects a logits row for every packed prompt
@@ -959,7 +962,10 @@ class MetalModelRunner:
         ``prompt_logprobs=0`` is still accepted. ``_start_paged_forward``
         warns once when a step first takes it.
         """
-        if not self._selective_logits_supported:
+        adapter = self._multimodal_adapter
+        if not self._selective_logits_supported or (
+            adapter is not None and adapter.forward_ready
+        ):
             return None
         rows = int(input_ids.shape[-1])
         speculative = self.vllm_config.speculative_config
