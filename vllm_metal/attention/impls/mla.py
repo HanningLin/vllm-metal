@@ -44,6 +44,11 @@ class MLAForwardMetadata:
     slot_mapping: mx.array  # int64, latent-cache scatter
     block_table_rows: tuple[mx.array, ...] | None = None  # per-request int32, SDPA loop
     kernel: MLAKernelMetadata | None = None
+    # Batched absorbed decode: eligible row list (empty once computed when
+    # the gates reject) and its on-device index array, both built once per
+    # forward and shared by every layer.
+    decode_batch_rows: list[int] | None = None
+    decode_batch_idx: mx.array | None = None
 
 
 def _mla_metadata(ctx: PagedAttentionContext) -> MLAForwardMetadata:
@@ -522,41 +527,62 @@ class MLAPagedAttentionWrapper(nn.Module):
         ``req_indices`` order.
 
         Only valid for absorbed models (embed_q/unembed_out) and num_new==1
-        segments — multi-token segments need the per-segment causal mask."""
+        segments — multi-token segments need the per-segment causal mask.
+
+        The padded gather materializes ``n * max_ctx`` latent rows, so the
+        row list is split into chunks that each stay under
+        ``_DECODE_BATCH_MAX_TOKENS`` — large batches chunk instead of
+        falling back to the per-segment loop."""
         n = len(req_indices)
         kv_lora_rank = inner.kv_lora_rank
         kernel = _kernel_inputs(ctx)
         max_ctx = max(ctx.context_lens[i] for i in req_indices)
 
-        idx = mx.array(req_indices, dtype=mx.int32)
-        # Padded block tables are built once per forward (#821); padding
-        # entries point at block 0 and are masked out below. Slice to the
-        # subset's own block span so co-scheduled long-context segments don't
-        # inflate the gather.
-        n_blocks = math.ceil(max_ctx / latent_cache.block_size)
-        all_latent = latent_cache.latent_caches[layer_idx][
-            kernel.block_tables[idx][:, :n_blocks]
-        ].reshape(n, -1, latent_cache.latent_dim)[:, :max_ctx]
-        all_kv_norm = all_latent[..., :kv_lora_rank]
-        all_k_pe = all_latent[..., kv_lora_rank:]
+        meta = _mla_metadata(ctx)
+        idx = meta.decode_batch_idx
+        if idx is None or idx.shape[0] != len(req_indices):
+            idx = meta.decode_batch_idx = mx.array(req_indices, dtype=mx.int32)
 
-        # cu_seqlens_q is already on-device from _kernel_inputs; gather the
-        # decode rows' packed start offsets instead of re-uploading them.
-        starts = mx.take(kernel.cu_seqlens_q, idx)
-        rq_nope = mx.take(q_nope[0], starts, axis=1).transpose(1, 0, 2)[:, :, None, :]
-        rq_pe = mx.take(q_pe[0], starts, axis=1).transpose(1, 0, 2)[:, :, None, :]
+        outs = []
+        rows_per = max(1, _DECODE_BATCH_MAX_TOKENS // max_ctx)
+        for c0 in range(0, n, rows_per):
+            rows = req_indices[c0 : c0 + rows_per]
+            cidx = idx[c0 : c0 + len(rows)]
+            n_c = len(rows)
+            max_ctx_c = max(ctx.context_lens[i] for i in rows)
+            # Padded block tables are built once per forward (#821); padding
+            # entries point at block 0 and are masked out below. Slice to the
+            # chunk's own block span so co-scheduled long-context segments
+            # don't inflate the gather.
+            n_blocks = math.ceil(max_ctx_c / latent_cache.block_size)
+            all_latent = latent_cache.latent_caches[layer_idx][
+                kernel.block_tables[cidx][:, :n_blocks]
+            ].reshape(n_c, -1, latent_cache.latent_dim)[:, :max_ctx_c]
+            all_kv_norm = all_latent[..., :kv_lora_rank]
+            all_k_pe = all_latent[..., kv_lora_rank:]
 
-        cols = mx.arange(max_ctx).reshape(1, -1)
-        valid = (
-            cols < kernel.context_lens[idx].astype(mx.int32).reshape(-1, 1)
-        ).reshape(n, 1, 1, max_ctx)
-        return self._apply_mla_attention(
-            rq_nope=rq_nope,
-            rq_pe=rq_pe,
-            all_kv_norm=all_kv_norm,
-            k_pe=all_k_pe.reshape(n, 1, max_ctx, inner.qk_rope_head_dim),
-            causal_mask=valid,
-        )  # [n, nheads, 1, v_head_dim]
+            # cu_seqlens_q is already on-device from _kernel_inputs; gather the
+            # decode rows' packed start offsets instead of re-uploading them.
+            starts = mx.take(kernel.cu_seqlens_q, cidx)
+            rq_nope = mx.take(q_nope[0], starts, axis=1).transpose(1, 0, 2)[
+                :, :, None, :
+            ]
+            rq_pe = mx.take(q_pe[0], starts, axis=1).transpose(1, 0, 2)[:, :, None, :]
+
+            cols = mx.arange(max_ctx_c).reshape(1, -1)
+            valid = (
+                cols < kernel.context_lens[cidx].astype(mx.int32).reshape(-1, 1)
+            ).reshape(n_c, 1, 1, max_ctx_c)
+            outs.append(
+                self._apply_mla_attention(
+                    rq_nope=rq_nope,
+                    rq_pe=rq_pe,
+                    all_kv_norm=all_kv_norm,
+                    k_pe=all_k_pe.reshape(n_c, 1, max_ctx_c, inner.qk_rope_head_dim),
+                    causal_mask=valid,
+                )
+            )  # [n_c, nheads, 1, v_head_dim]
+        return outs[0] if len(outs) == 1 else mx.concatenate(outs, axis=0)
 
     def _decode_batch_rows(self, ctx: Any) -> list[int] | None:
         """Request indices of the single-token decode segments worth one
@@ -566,20 +592,20 @@ class MLAPagedAttentionWrapper(nn.Module):
         when the batching gates reject.  Rows left out keep the per-segment
         loop — one long context must not inflate the padded gather for the
         whole batch.  Routing never marks decode rows, so every index
-        returned here is an unrouted segment wherever it's used."""
+        returned here is an unrouted segment wherever it's used.  The result
+        is memoized on the per-forward metadata so all layers share it."""
         if not self._is_absorbed:
             return None
-        cu = ctx.cu_seqlens
-        idx = [
-            i
-            for i, ctx_len in enumerate(ctx.context_lens)
-            if cu[i + 1] - cu[i] == 1 and ctx_len <= _DECODE_BATCH_MAX_CTX
-        ]
-        if len(idx) < _DECODE_BATCH_MIN_ROWS:
-            return None
-        if len(idx) * max(ctx.context_lens[i] for i in idx) > _DECODE_BATCH_MAX_TOKENS:
-            return None
-        return idx
+        meta = _mla_metadata(ctx)
+        if meta.decode_batch_rows is None:
+            cu = ctx.cu_seqlens
+            idx = [
+                i
+                for i, ctx_len in enumerate(ctx.context_lens)
+                if cu[i + 1] - cu[i] == 1 and ctx_len <= _DECODE_BATCH_MAX_CTX
+            ]
+            meta.decode_batch_rows = idx if len(idx) >= _DECODE_BATCH_MIN_ROWS else []
+        return meta.decode_batch_rows or None
 
     def _materialized_prefill(
         self,

@@ -404,9 +404,14 @@ def test_decode_batch_rows_gating(monkeypatch: pytest.MonkeyPatch) -> None:
     ctx = _ctx([16, 16, 32, 16, 16], [0, 1, 2, 4, 5, 6])
     assert route(ctx) == [0, 1, 3, 4]
 
-    # Padded-volume cap: n * max_ctx too large -> stay on the loop.
+    # Padded volume past the cap no longer rejects: the batch chunks
+    # inside _absorbed_decode_batch instead.
     monkeypatch.setattr(mla_mod, "_DECODE_BATCH_MAX_TOKENS", 512)
-    assert route(_ctx([64] * 16, list(range(17)))) is None
+    ctx = _ctx([64] * 16, list(range(17)))
+    assert route(ctx) == list(range(16))
+
+    # The row list is memoized on the per-forward metadata.
+    assert mla_mod._mla_metadata(ctx).decode_batch_rows == list(range(16))
 
 
 @pytest.mark.parametrize(
@@ -414,23 +419,45 @@ def test_decode_batch_rows_gating(monkeypatch: pytest.MonkeyPatch) -> None:
     [(False, 2e-2), (True, 6e-2)],
     ids=["dense", "quantized-4bit"],
 )
+@pytest.mark.parametrize(
+    "token_cap",
+    [65536, 64],
+    ids=["single-chunk", "chunked"],
+)
 def test_batched_decode_matches_absorbed_loop(
-    quantize: bool, atol: float, monkeypatch: pytest.MonkeyPatch
+    quantize: bool, atol: float, token_cap: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """18 decode rows with varied contexts, one over the cap: the short rows
     take the batched absorbed pass (unequal contexts exercise the padding
     mask), the long row stays on the per-segment loop, and the packed output
-    matches the all-looped reference."""
+    matches the all-looped reference.  The chunked variant caps the padded
+    volume so the batch splits into multiple passes instead of falling back
+    to the loop."""
     import math
 
     import vllm_metal.attention.impls.mla as mla_mod
 
     n_rows = 18
+    attn_passes: list[int] = []
+    real_attn = MLAPagedAttentionWrapper._apply_absorbed_mla_attention
+
+    def attn_spy(self, *args, **kwargs):
+        # rq_nope is [n_rows, nheads, 1, dim]: the pass's batch size.
+        attn_passes.append(kwargs["rq_nope"].shape[0])
+        return real_attn(self, *args, **kwargs)
+
+    # _apply_mla_attention is bound to _apply_absorbed_mla_attention at
+    # __init__, so the spy must be installed before the wrapper is built.
+    monkeypatch.setattr(
+        MLAPagedAttentionWrapper, "_apply_absorbed_mla_attention", attn_spy
+    )
     inner, cache, wrapper = _make(quantize=quantize, num_blocks=64)
     # Scaled-down gates: the row with 48 cached tokens stays on the
-    # per-segment loop while the other 17 rows batch.
+    # per-segment loop while the other 17 rows batch.  max_ctx is 29, so a
+    # 64-token cap chunks the batch into groups of 2.
     monkeypatch.setattr(mla_mod, "_DECODE_BATCH_MAX_CTX", 40)
     monkeypatch.setattr(mla_mod, "_DECODE_BATCH_MIN_ROWS", 4)
+    monkeypatch.setattr(mla_mod, "_DECODE_BATCH_MAX_TOKENS", token_cap)
 
     # Varied past lengths (16..30) so batched rows pad to the max context.
     pasts = [16 + 3 * (i % 5) for i in range(n_rows)]
@@ -491,6 +518,7 @@ def test_batched_decode_matches_absorbed_loop(
         pac.clear_context()
         absorbed_calls.clear()
         batched_groups.clear()
+        attn_passes.clear()
         pac.set_context(ctx2)
         out = wrapper(x2, mask=None, cache=None)
         mx.eval(out)
@@ -501,7 +529,14 @@ def test_batched_decode_matches_absorbed_loop(
     monkeypatch.setattr(MLAPagedAttentionWrapper, "_absorbed_decode_batch", batch_spy)
     out = run()
     assert absorbed_calls == [9]  # only the over-cap row loops
-    assert batched_groups == [[i for i in range(n_rows) if i != 9]]
+    batched = [i for i in range(n_rows) if i != 9]
+    assert batched_groups == [batched]
+    # Chunk size = token_cap // 29 (the batch's max ctx): one pass when the
+    # cap fits, chunked otherwise — never the loop.
+    rows_per = max(1, token_cap // 29)
+    assert attn_passes == [
+        min(rows_per, len(batched) - i) for i in range(0, len(batched), rows_per)
+    ] + [1]
 
     # Reference: batching gate off -> every row on the per-segment loop.
     monkeypatch.setattr(
