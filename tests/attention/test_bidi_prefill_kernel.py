@@ -509,8 +509,9 @@ def test_two_segments_with_blocks_are_spliced_independently() -> None:
 
 
 @pytest.mark.parametrize("magnitude", [1.5, 2.0, 4.0])
+@pytest.mark.parametrize("poisoned_group", [0, 1])
 def test_tiled_prefill_rows_behind_masked_first_tile_stay_neutral(
-    magnitude,
+    magnitude, poisoned_group
 ) -> None:
     """A KV tile fully masked for a row must not affect that row's max
     state or its V output (#876).  The masked V slots carry +/-fp16-max:
@@ -518,6 +519,12 @@ def test_tiled_prefill_rows_behind_masked_first_tile_stay_neutral(
     correct kernel contributes exactly 0.  (inf would poison the
     *correct* kernel too — the PV MMA computes 0 * inf = NaN for
     P == 0 elements.)
+
+    One threadgroup's first tile is poisoned per case.  Rows of an earlier
+    threadgroup read those keys inside their window, so their reference is
+    dominated by the poison and a relative tolerance says nothing about
+    them; the tight comparison covers the poisoned group and every group
+    after it.
     """
     n, seq_len, window = 64, 216, 96
     cfg = get_ops().tile_config(HD)
@@ -537,10 +544,10 @@ def test_tiled_prefill_rows_behind_masked_first_tile_stay_neutral(
     table_row = table[0].tolist()
     huge = np.finfo(np.float16).max
     vc = np.array(value_cache)
-    for tg0 in range(0, n, bq):
-        w0 = row0_win_start + tg0
-        for p in range(w0 - w0 % tile_kv, w0):
-            vc[table_row[p // BLOCK], p % BLOCK] = huge if p % 2 == 0 else -huge
+    first_row = poisoned_group * bq
+    w0 = row0_win_start + first_row
+    for p in range(w0 - w0 % tile_kv, w0):
+        vc[table_row[p // BLOCK], p % BLOCK] = huge if p % 2 == 0 else -huge
     value_cache = mx.array(vc)
     mx.eval(query, key_cache, value_cache)
     got = _kernel(
@@ -557,4 +564,4 @@ def test_tiled_prefill_rows_behind_masked_first_tile_stay_neutral(
     )
     out = np.array(got)
     assert np.isfinite(out).all()
-    np.testing.assert_allclose(out, ref, atol=1.5e-2, rtol=1e-2)
+    np.testing.assert_allclose(out[first_row:], ref[first_row:], atol=1.5e-2, rtol=1e-2)
