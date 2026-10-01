@@ -13,6 +13,7 @@ from vllm_metal import envs
 from vllm_metal.attention.caches.mla_cache import MLAPagedLatentCache
 from vllm_metal.attention.context import PagedAttentionContext, get_context
 from vllm_metal.attention.impls.varlen_rope_compat import apply_packed_rope
+from vllm_metal.metal.constants import MLA_KERNEL_BLOCK_SIZES
 
 # Default rope head dim for GLM/DeepSeek-V2 lineage models.
 # Used as fallback when qk_rope_head_dim is absent from model config.
@@ -203,7 +204,6 @@ class MLAPagedAttentionWrapper(nn.Module):
     # through to the MLX SDPA slow path.
     _KERNEL_KV_LORA_RANK = 512
     _KERNEL_QK_ROPE_HEAD_DIM = 64
-    _KERNEL_BLOCK_SIZES = frozenset({16, 32})
 
     def __init__(
         self,
@@ -347,8 +347,8 @@ class MLAPagedAttentionWrapper(nn.Module):
                 f"qk_rope_head_dim {inner.qk_rope_head_dim}, "
                 f"the kernel takes {self._KERNEL_QK_ROPE_HEAD_DIM}"
             )
-        if latent_cache.block_size not in self._KERNEL_BLOCK_SIZES:
-            sizes = " or ".join(str(s) for s in sorted(self._KERNEL_BLOCK_SIZES))
+        if latent_cache.block_size not in MLA_KERNEL_BLOCK_SIZES:
+            sizes = " or ".join(str(s) for s in sorted(MLA_KERNEL_BLOCK_SIZES))
             return f"block size {latent_cache.block_size}, the kernel takes {sizes}"
         if latent_cache.dtype not in (mx.float16, mx.bfloat16):
             dtype = str(latent_cache.dtype).rsplit(".", 1)[-1]
