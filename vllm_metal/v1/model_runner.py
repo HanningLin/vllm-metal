@@ -905,17 +905,8 @@ class MetalModelRunner:
         cache_before = mx.get_cache_memory()
         dummy_tokens = mx.zeros((1, warmup_len), dtype=mx.int32)
         mx.eval(*self._dummy_forward_outputs(dummy_tokens))
-        from vllm_metal.v1.dflash_proposer import DFlashProposer
-
-        if isinstance(self._drafter, DFlashProposer):
-            captured = self._target_forward(
-                dummy_tokens, logits_indices=self._profile_logits_indices(dummy_tokens)
-            )
-            mx.eval(captured.logits, *captured.aux_hidden_states)
-            self._drafter.profile(
-                captured.aux_hidden_states, self.scheduler_config.max_num_seqs
-            )
-            del captured
+        if self._drafter is not None:
+            self._drafter.profile_warmup(self, dummy_tokens)
         # The vision encoder runs outside the text forward; profile it too so
         # the buffer-cache cap covers one encoder pass (the runner encodes
         # features one adapter call per step, so one maximal feature is the

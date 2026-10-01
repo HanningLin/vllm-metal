@@ -167,6 +167,14 @@ class DFlashProposer:
         for req_id in req_ids:
             self._valid_ends.pop(req_id, None)
 
+    def profile_warmup(self, runner: MetalModelRunner, tokens: mx.array) -> None:
+        """Run the target capture forward and profile the drafter's buffers."""
+        captured = runner._target_forward(
+            tokens, logits_indices=runner._profile_logits_indices(tokens)
+        )
+        mx.eval(captured.logits, *captured.aux_hidden_states)
+        self.profile(captured.aux_hidden_states, runner.scheduler_config.max_num_seqs)
+
     def profile(self, features: Sequence[mx.array], max_num_seqs: int) -> None:
         """Include captured-feature projection and block drafting in profiling."""
         model = self.model
