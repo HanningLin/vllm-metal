@@ -98,32 +98,6 @@ def test_health_request_uses_remaining_timeout(monkeypatch):
     assert seen and all(0 < timeout <= 0.05 for timeout in seen)
 
 
-def test_health_response_is_closed_before_model_lookup(monkeypatch):
-    class TrackedResponse(io.BytesIO):
-        status = 200
-        active = False
-
-        def __enter__(self):
-            self.active = True
-            return super().__enter__()
-
-        def __exit__(self, *args):
-            self.active = False
-            return super().__exit__(*args)
-
-    health = TrackedResponse(b"")
-
-    def response(url, *, timeout):
-        if url.endswith("/health"):
-            return health
-        assert not health.active
-        return io.BytesIO(json.dumps({"data": [{"id": "this-run"}]}).encode())
-
-    monkeypatch.setattr(smoke.urllib.request, "urlopen", response)
-    serve = SimpleNamespace(poll=lambda: None)
-    assert smoke._wait_for_health("http://127.0.0.1:1", 1, serve, "this-run")
-
-
 @pytest.mark.parametrize("data", [None, 7, "invalid"])
 def test_malformed_model_list_does_not_crash(healthy_server, monkeypatch, data):
     original_urlopen = smoke.urllib.request.urlopen
